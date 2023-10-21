@@ -69,6 +69,7 @@ public class TestHoodiePartitionMetadata extends HoodieCommonTestHarness {
   @ParameterizedTest
   @MethodSource("formatProviderFn")
   public void testTextFormatMetaFile(Option<HoodieFileFormat> format) throws IOException {
+    // CREATE
     // given
     final Path partitionPath = new Path(basePath, "a/b/"
         + format.map(Enum::name).orElse("text"));
@@ -84,6 +85,22 @@ public class TestHoodiePartitionMetadata extends HoodieCommonTestHarness {
     assertTrue(HoodiePartitionMetadata.hasPartitionMetadata(fs, partitionPath));
     assertEquals(Option.of(commitTime), readMetadata.readPartitionCreatedCommitTime());
     assertEquals(3, readMetadata.getPartitionDepth());
+    assertEquals(Option.of(commitTime), readMetadata.readPartitionUpdatedCommitTime());
+
+    // UPDATE the same partition
+    // given
+    final String updateTime = "000000000002";
+    writtenMetadata = new HoodiePartitionMetadata(metaClient.getFs(), updateTime, new Path(basePath), partitionPath, format);
+    writtenMetadata.trySave(0);
+
+    // when
+    readMetadata = new HoodiePartitionMetadata(metaClient.getFs(), new Path(metaClient.getBasePath(), partitionPath));
+
+    // then
+    assertTrue(HoodiePartitionMetadata.hasPartitionMetadata(fs, partitionPath));
+    assertEquals(Option.of(commitTime), readMetadata.readPartitionCreatedCommitTime());
+    assertEquals(3, readMetadata.getPartitionDepth());
+    assertEquals(Option.of(updateTime), readMetadata.readPartitionUpdatedCommitTime());
   }
 
   @Test

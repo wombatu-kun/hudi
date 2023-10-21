@@ -20,11 +20,24 @@ package org.apache.hudi.table;
 
 import org.apache.hudi.adapter.TestTableEnvs;
 import org.apache.hudi.common.model.DefaultHoodieRecordPayload;
+import org.apache.hudi.common.model.HoodieCommitMetadata;
+import org.apache.hudi.common.model.HoodiePartitionMetadata;
+import org.apache.hudi.common.model.HoodieReplaceCommitMetadata;
 import org.apache.hudi.common.model.HoodieTableType;
+import org.apache.hudi.common.table.HoodieTableMetaClient;
 import org.apache.hudi.common.table.cdc.HoodieCDCSupplementalLoggingMode;
+import org.apache.hudi.common.table.timeline.HoodieInstant;
+import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.HoodieTimeline;
+import org.apache.hudi.common.table.ttl.TtlConfigurer;
+import org.apache.hudi.common.table.ttl.TtlPolicyDAO;
+import org.apache.hudi.common.table.ttl.model.TtlPolicy;
+import org.apache.hudi.common.table.ttl.model.TtlPolicyLevel;
+import org.apache.hudi.common.table.ttl.model.TtlTriggerStrategy;
 import org.apache.hudi.common.util.CollectionUtils;
+import org.apache.hudi.common.util.Option;
 import org.apache.hudi.configuration.FlinkOptions;
+import org.apache.hudi.sink.partitioner.profile.WriteProfiles;
 import org.apache.hudi.table.catalog.HoodieCatalogTestUtils;
 import org.apache.hudi.table.catalog.HoodieHiveCatalog;
 import org.apache.hudi.util.StreamerUtil;
@@ -48,6 +61,7 @@ import org.apache.flink.table.catalog.exceptions.TableNotExistException;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.types.Row;
 import org.apache.flink.util.CollectionUtil;
+import org.apache.hadoop.fs.Path;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -59,7 +73,11 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.junit.jupiter.params.provider.ValueSource;
 
 import java.io.File;
+import java.io.IOException;
+import java.time.LocalDateTime;
 import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.temporal.ChronoUnit;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
@@ -78,6 +96,12 @@ import static org.apache.hudi.utils.TestData.assertRowsEqualsUnordered;
 import static org.apache.hudi.utils.TestData.assertRowsEquals;
 import static org.apache.hudi.utils.TestData.map;
 import static org.apache.hudi.utils.TestData.row;
+import static org.hamcrest.CoreMatchers.instanceOf;
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.MatcherAssert.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -2048,6 +2072,74 @@ public class ITTestHoodieDataSource {
     assertRowsEquals(result, "["
         + "+I[id7, Bob, 44, 1970-01-01T00:00:07, par4], "
         + "+I[id8, Han, 56, 1970-01-01T00:00:08, par4]]");
+  }
+
+  @Test
+  void testPartitionTtlProcessingInline() throws IOException {
+    TableEnvironment tableEnv = batchTableEnv;
+    String tableName = "t1";
+    String tablePath = tempFile.getAbsolutePath();
+    String createTable = sql(tableName)
+        .field("id int not null")
+        .field("name varchar(10)")
+        .field("price double")
+        .field("ts bigint")
+        .field("dt varchar(10)")
+        .option(FlinkOptions.PATH, tablePath)
+        .option(FlinkOptions.PRECOMBINE_FIELD, "ts")
+        .pkField("id")
+        .partitionField("dt")
+        .end();
+    tableEnv.executeSql(createTable);
+
+    String ts1 = preparePartition(tableEnv, tableName, tablePath, "2021-12-03", 25L, 1);
+    String ts2 = preparePartition(tableEnv, tableName, tablePath, "2019-01-05", 15L, 2);
+    String ts3 = preparePartition(tableEnv, tableName, tablePath, "2022-02-24", 500L, 3);
+
+    List<Row> result = CollectionUtil.iterableToList(
+        () -> tableEnv.sqlQuery("select * from " + tableName).execute().collect());
+    result.forEach(System.out::println);
+
+    // create TTL policies
+    HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder().setBasePath(tablePath).setConf(new org.apache.hadoop.conf.Configuration()).build();
+    TtlPolicyDAO ttlPolicyDAO = metaClient.getTtlPolicyDAO();
+    TtlPolicy policy1 = new TtlPolicy("*", TtlPolicyLevel.PARTITION, 5, ChronoUnit.DAYS);
+    ttlPolicyDAO.save(policy1);
+    TtlPolicy policy2 = new TtlPolicy("202*", TtlPolicyLevel.PARTITION, 4, ChronoUnit.WEEKS);
+    ttlPolicyDAO.save(policy2);
+    TtlPolicy policy3 = new TtlPolicy("2022-02-24", TtlPolicyLevel.PARTITION, 100, ChronoUnit.YEARS);
+    ttlPolicyDAO.save(policy3);
+
+    // enable TTL with NUM_COMMITS = 1
+    TtlConfigurer.setAndGetTtlConf(metaClient.getFs(), metaClient.getMetaPath(), "true", TtlTriggerStrategy.NUM_COMMITS.name(), "1", null);
+    // create commit
+    String ts4 = preparePartition(tableEnv, tableName, tablePath, "1985-04-26", 502L, 4);
+
+    // check results of inline TTL execution
+    HoodieInstant latestInstant = metaClient.getActiveTimeline().filterCompletedInstants().lastInstant().orElse(null);
+    assertNotNull(latestInstant, "Delete partition commit should be completed");
+    HoodieCommitMetadata commitMetadata = WriteProfiles.getCommitMetadata("tb1", new org.apache.flink.core.fs.Path(tablePath), latestInstant, metaClient.getActiveTimeline());
+    assertThat(commitMetadata, instanceOf(HoodieReplaceCommitMetadata.class));
+    HoodieReplaceCommitMetadata replaceCommitMetadata = (HoodieReplaceCommitMetadata) commitMetadata;
+    assertThat(replaceCommitMetadata.getPartitionToReplaceFileIds().size(), is(1));
+    result = CollectionUtil.iterableToList(
+        () -> tableEnv.sqlQuery("select * from " + tableName).execute().collect());
+    result.forEach(System.out::println);
+    assertEquals(3, result.size());
+    assertFalse(result.stream().anyMatch(r -> String.valueOf(r.getField("dt")).equals("2019-01-05")));
+  }
+
+  private String preparePartition(TableEnvironment tableEnv, String tableName, String tablePath, String partition, Long daysBefore, int id) throws IOException {
+    String insertInto = "insert into " + tableName + " values (" + id + ", 'a" + id + "', 888, 1000, '" + partition + "')";
+    execInsertSql(tableEnv, insertInto);
+    // create old partition metadata in partition
+    HoodieTableMetaClient metaClient = HoodieTableMetaClient.builder().setBasePath(tempFile.getAbsolutePath()).setConf(new org.apache.hadoop.conf.Configuration()).build();
+    DateTimeFormatter formatter = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
+    LocalDateTime now = LocalDateTime.now();
+    String ts = HoodieInstantTimeGenerator.getInstantForDateString(now.minusDays(daysBefore).format(formatter));
+    HoodiePartitionMetadata writtenMetadata = new HoodiePartitionMetadata(metaClient.getFs(), ts, new Path(tablePath), new Path(tablePath, partition), Option.empty());
+    writtenMetadata.trySave(0);
+    return ts;
   }
 
   // -------------------------------------------------------------------------

@@ -18,6 +18,7 @@
 
 package org.apache.hudi.common.table;
 
+import org.apache.hudi.common.table.ttl.model.TtlTriggerStrategy;
 import org.apache.hudi.common.testutils.HoodieCommonTestHarness;
 import org.apache.hudi.common.util.CollectionUtils;
 import org.apache.hudi.exception.HoodieIOException;
@@ -93,6 +94,20 @@ public class TestHoodieTableConfig extends HoodieCommonTestHarness {
     assertEquals(7, config.getProps().size());
     assertEquals("test-table2", config.getTableName());
     assertEquals("new_field", config.getPreCombineField());
+    assertFalse(config.isTtlPoliciesEnabled());
+    assertEquals(TtlTriggerStrategy.NUM_COMMITS.toString(), config.getTtlTriggerStrategy());
+    assertEquals("10", config.getTtlTriggerValue());
+
+    updatedProps = new Properties();
+    updatedProps.setProperty(HoodieTableConfig.TTL_POLICIES_ENABLED.key(), "true");
+    updatedProps.setProperty(HoodieTableConfig.TTL_TRIGGER_STRATEGY.key(), TtlTriggerStrategy.TIME_ELAPSED.toString());
+    updatedProps.setProperty(HoodieTableConfig.TTL_TRIGGER_VALUE.key(), "8");
+    HoodieTableConfig.update(fs, metaPath, updatedProps);
+    config = new HoodieTableConfig(fs, metaPath.toString(), null, null);
+    assertEquals(10, config.getProps().size());
+    assertTrue(config.isTtlPoliciesEnabled());
+    assertEquals(TtlTriggerStrategy.TIME_ELAPSED.toString(), config.getTtlTriggerStrategy());
+    assertEquals("8", config.getTtlTriggerValue());
   }
 
   @Test

@@ -19,6 +19,7 @@
 package org.apache.hudi.cli.commands;
 
 import org.apache.hudi.DataSourceWriteOptions;
+import org.apache.hudi.cli.HoodieCLI;
 import org.apache.hudi.cli.utils.SparkUtil;
 import org.apache.hudi.client.SparkRDDWriteClient;
 import org.apache.hudi.client.common.HoodieSparkEngineContext;
@@ -49,6 +50,7 @@ import org.apache.hudi.keygen.constant.KeyGeneratorType;
 import org.apache.hudi.table.HoodieSparkTable;
 import org.apache.hudi.table.action.compact.strategy.UnBoundedCompactionStrategy;
 import org.apache.hudi.table.marker.WriteMarkersFactory;
+import org.apache.hudi.table.ttl.TtlPolicyService;
 import org.apache.hudi.table.upgrade.SparkUpgradeDowngradeHelper;
 import org.apache.hudi.table.upgrade.UpgradeDowngrade;
 import org.apache.hudi.utilities.HDFSParquetImporter;
@@ -102,7 +104,7 @@ public class SparkMain {
     BOOTSTRAP, ROLLBACK, DEDUPLICATE, ROLLBACK_TO_SAVEPOINT, SAVEPOINT, IMPORT, UPSERT, COMPACT_SCHEDULE, COMPACT_RUN, COMPACT_SCHEDULE_AND_EXECUTE,
     COMPACT_UNSCHEDULE_PLAN, COMPACT_UNSCHEDULE_FILE, COMPACT_VALIDATE, COMPACT_REPAIR, CLUSTERING_SCHEDULE,
     CLUSTERING_RUN, CLUSTERING_SCHEDULE_AND_EXECUTE, CLEAN, DELETE_MARKER, DELETE_SAVEPOINT, UPGRADE, DOWNGRADE,
-    REPAIR_DEPRECATED_PARTITION, RENAME_PARTITION, ARCHIVE
+    REPAIR_DEPRECATED_PARTITION, RENAME_PARTITION, ARCHIVE, TTL_RUN
   }
 
   public static void main(String[] args) throws Exception {
@@ -297,6 +299,10 @@ public class SparkMain {
         case ARCHIVE:
           assert (args.length == 8);
           returnCode = archive(jsc, Integer.parseInt(args[3]), Integer.parseInt(args[4]), Integer.parseInt(args[5]), Boolean.parseBoolean(args[6]), args[7]);
+          break;
+        case TTL_RUN:
+          assert (args.length == 5);
+          returnCode = runTtlProcessing(jsc, args[3], args[4]);
           break;
         default:
           break;
@@ -669,5 +675,20 @@ public class SparkMain {
       return  -1;
     }
     return 0;
+  }
+
+  private static int runTtlProcessing(JavaSparkContext jsc, String dryRun, String basePath) {
+    try {
+      SparkRDDWriteClient client = createHoodieClient(jsc, basePath, false);
+      HoodieWriteConfig config = client.getConfig();
+      HoodieEngineContext context = client.getEngineContext();
+      HoodieSparkTable table = HoodieSparkTable.create(config, context);
+      new TtlPolicyService(HoodieCLI.getTableMetaClient(), context, table)
+          .run("false".equalsIgnoreCase(dryRun) ? false : true);
+      return 0;
+    } catch (Exception e) {
+      LOG.warn("Failed: Could not run TTL policies processing", e);
+      return -1;
+    }
   }
 }

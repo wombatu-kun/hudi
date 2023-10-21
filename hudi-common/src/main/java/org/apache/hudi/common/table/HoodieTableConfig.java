@@ -34,6 +34,8 @@ import org.apache.hudi.common.model.RecordPayloadType;
 import org.apache.hudi.common.table.cdc.HoodieCDCSupplementalLoggingMode;
 import org.apache.hudi.common.table.timeline.HoodieInstantTimeGenerator;
 import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
+import org.apache.hudi.common.table.ttl.model.TtlPoliciesConflictResolutionRule;
+import org.apache.hudi.common.table.ttl.model.TtlTriggerStrategy;
 import org.apache.hudi.common.util.BinaryUtil;
 import org.apache.hudi.common.util.FileIOUtils;
 import org.apache.hudi.common.util.Option;
@@ -277,6 +279,29 @@ public class HoodieTableConfig extends HoodieConfig {
       .sinceVersion("0.11.0")
       .withDocumentation("Comma-separated list of metadata partitions that have been completely built and in-sync with data table. "
           + "These partitions are ready for use by the readers");
+
+  public static final ConfigProperty<Boolean> TTL_POLICIES_ENABLED = ConfigProperty
+      .key("hoodie.ttl.policies.enabled")
+      .defaultValue(false)
+      .withDocumentation("When set to true, will delete old data according to configured TTL policies. By default, false.");
+
+  public static final ConfigProperty<String> TTL_TRIGGER_STRATEGY = ConfigProperty
+      .key("hoodie.ttl.policies.trigger.strategy")
+      .defaultValue(TtlTriggerStrategy.NUM_COMMITS.toString())
+      .withDocumentation("Trigger strategy for TTL-management process execution (NUM_COMMITS or TIME_ELAPSED). By default, NUM_COMMITS");
+
+  public static final ConfigProperty<String> TTL_TRIGGER_VALUE = ConfigProperty
+      .key("hoodie.ttl.policies.trigger.value")
+      .defaultValue("10")
+      .withDocumentation("Value for trigger strategy for TTL-management process execution."
+          + " If TTL_TRIGGER_STRATEGY is set to TIME_ELAPSED then TTL_TRIGGER_VALUE units considered as ChronoUnit.DAYS");
+
+  public static final ConfigProperty<String> TTL_POLICIES_CONFLICT_RESOLUTION_RULE = ConfigProperty
+      .key("hoodie.ttl.policies.conflict.resolution.rule")
+      .defaultValue(TtlPoliciesConflictResolutionRule.MAX_TTL.toString())
+      .withDocumentation("TTL policies conflict resolution rule (MIN_TTL or MAX_TTL):"
+          + " MIN_TTL used in case of 'prefer cleaning' to minimize disk space costs; "
+          + " MAX_TTL used in case of 'prefer to save data' to prevent deletion of any data in case of ambiguity. By default, MAX_TTL");
 
   public static final ConfigProperty<String> SECONDARY_INDEXES_METADATA = ConfigProperty
       .key("hoodie.table.secondary.indexes.metadata")
@@ -745,6 +770,22 @@ public class HoodieTableConfig extends HoodieConfig {
 
   public Boolean shouldDropPartitionColumns() {
     return getBooleanOrDefault(DROP_PARTITION_COLUMNS);
+  }
+
+  public Boolean isTtlPoliciesEnabled() {
+    return getBooleanOrDefault(TTL_POLICIES_ENABLED);
+  }
+
+  public String getTtlTriggerStrategy() {
+    return getStringOrDefault(TTL_TRIGGER_STRATEGY);
+  }
+
+  public String getTtlTriggerValue() {
+    return getStringOrDefault(TTL_TRIGGER_VALUE);
+  }
+
+  public String getTtlPoliciesConflictResolutionRule() {
+    return getStringOrDefault(TTL_POLICIES_CONFLICT_RESOLUTION_RULE);
   }
 
   /**

@@ -43,6 +43,9 @@ import org.apache.hudi.common.table.timeline.TimeGenerator;
 import org.apache.hudi.common.table.timeline.TimeGenerators;
 import org.apache.hudi.common.table.timeline.TimelineLayout;
 import org.apache.hudi.common.table.timeline.versioning.TimelineLayoutVersion;
+import org.apache.hudi.common.table.ttl.TtlPolicyDAO;
+import org.apache.hudi.common.table.ttl.TtlPolicyDAOJson;
+import org.apache.hudi.common.table.ttl.model.TtlPoliciesConflictResolutionRule;
 import org.apache.hudi.common.util.CommitUtils;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
@@ -129,6 +132,7 @@ public class HoodieTableMetaClient implements Serializable {
   private FileSystemRetryConfig fileSystemRetryConfig = FileSystemRetryConfig.newBuilder().build();
   protected HoodieMetaserverConfig metaserverConfig;
   private HoodieTimeGeneratorConfig timeGeneratorConfig;
+  private transient TtlPolicyDAO ttlPolicyDAO;
 
   /**
    * Instantiate HoodieTableMetaClient.
@@ -164,6 +168,7 @@ public class HoodieTableMetaClient implements Serializable {
       LOG.info("Loading Active commit timeline for " + basePath);
       getActiveTimeline();
     }
+    this.ttlPolicyDAO = new TtlPolicyDAOJson(fs, getMetaPath(), TtlPoliciesConflictResolutionRule.valueOf(tableConfig.getTtlPoliciesConflictResolutionRule()));
   }
 
   /**
@@ -196,6 +201,7 @@ public class HoodieTableMetaClient implements Serializable {
     in.defaultReadObject();
 
     fs = null; // will be lazily initialized
+    ttlPolicyDAO = null;
   }
 
   private void writeObject(java.io.ObjectOutputStream out) throws IOException {
@@ -693,6 +699,10 @@ public class HoodieTableMetaClient implements Serializable {
       instantStream = TimelineLayout.getLayout(getTimelineLayoutVersion()).filterHoodieInstants(instantStream);
     }
     return instantStream.sorted().collect(Collectors.toList());
+  }
+
+  public TtlPolicyDAO getTtlPolicyDAO() {
+    return this.ttlPolicyDAO;
   }
 
   @Override

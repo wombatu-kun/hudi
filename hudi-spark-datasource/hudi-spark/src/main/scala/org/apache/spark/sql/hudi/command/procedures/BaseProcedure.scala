@@ -18,9 +18,13 @@
 package org.apache.spark.sql.hudi.command.procedures
 
 import org.apache.hudi.HoodieCLIUtils
+import org.apache.hudi.client.common.HoodieSparkEngineContext
+import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.config.{HoodieIndexConfig, HoodieWriteConfig}
 import org.apache.hudi.exception.HoodieException
 import org.apache.hudi.index.HoodieIndex.IndexType
+import org.apache.hudi.table.HoodieSparkTable
+import org.apache.hudi.table.ttl.TtlPolicyService
 import org.apache.spark.api.java.JavaSparkContext
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
@@ -95,4 +99,12 @@ abstract class BaseProcedure extends Procedure {
       )
   }
 
+  protected def getTtlPolicyService(tableName: Option[Any], tablePath: Option[Any] = Option.empty): TtlPolicyService = {
+    val basePath = getBasePath(tableName, tablePath)
+    val metaClient = HoodieTableMetaClient.builder.setConf(jsc.hadoopConfiguration()).setBasePath(basePath).build
+    val engineContext = new HoodieSparkEngineContext(sparkSession.sparkContext)
+    val hoodieTable = HoodieSparkTable.create(HoodieWriteConfig.newBuilder().withPath(basePath).build(),
+      engineContext, metaClient)
+    new TtlPolicyService(metaClient, engineContext, hoodieTable)
+  }
 }

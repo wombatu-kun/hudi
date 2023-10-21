@@ -59,6 +59,7 @@ public class HoodiePartitionMetadata {
 
   public static final String HOODIE_PARTITION_METAFILE_PREFIX = ".hoodie_partition_metadata";
   public static final String COMMIT_TIME_KEY = "commitTime";
+  public static final String LAST_UPDATE_TIME_KEY = "lastUpdateTime";
   private static final String PARTITION_DEPTH_KEY = "partitionDepth";
   private static final Logger LOG = LoggerFactory.getLogger(HoodiePartitionMetadata.class);
 
@@ -94,7 +95,13 @@ public class HoodiePartitionMetadata {
     this(fs, partitionPath);
     this.format = format;
     props.setProperty(COMMIT_TIME_KEY, instantTime);
+    props.setProperty(LAST_UPDATE_TIME_KEY, instantTime);
     props.setProperty(PARTITION_DEPTH_KEY, String.valueOf(partitionPath.depth() - basePath.depth()));
+  }
+
+  public HoodiePartitionMetadata(FileSystem fs, String instantTimeCreated, String instantTimeUpdated, Path basePath, Path partitionPath, Option<HoodieFileFormat> format) {
+    this(fs, instantTimeCreated, basePath, partitionPath, format);
+    props.setProperty(LAST_UPDATE_TIME_KEY, instantTimeUpdated);
   }
 
   public int getPartitionDepth() {
@@ -121,6 +128,17 @@ public class HoodiePartitionMetadata {
         writeMetafile(tmpMetaPath);
         // move to actual path
         fs.rename(tmpMetaPath, metaPath);
+      } else {
+        Properties propsFromFs = new Properties();
+        readFromFS(propsFromFs);
+        if (!props.getProperty(LAST_UPDATE_TIME_KEY).equals(propsFromFs.getProperty(LAST_UPDATE_TIME_KEY))) {
+          props.setProperty(COMMIT_TIME_KEY, propsFromFs.getProperty(COMMIT_TIME_KEY));
+          // write to temporary file
+          writeMetafile(tmpMetaPath);
+          // move to actual path
+          fs.delete(metaPath, true);
+          fs.rename(tmpMetaPath, metaPath);
+        }
       }
     } catch (IOException ioe) {
       LOG.warn("Error trying to save partition metadata (this is okay, as long as at least 1 of these succeeded), "
@@ -195,10 +213,10 @@ public class HoodiePartitionMetadata {
    */
   public void readFromFS() throws IOException {
     // first try reading the text format (legacy, currently widespread)
-    boolean readFile = readTextFormatMetaFile();
+    boolean readFile = readTextFormatMetaFile(this.props);
     if (!readFile) {
       // now try reading the base file formats.
-      readFile = readBaseFormatMetaFile();
+      readFile = readBaseFormatMetaFile(this.props);
     }
 
     // throw exception.
@@ -207,11 +225,26 @@ public class HoodiePartitionMetadata {
     }
   }
 
-  private boolean readTextFormatMetaFile() {
+  /**
+   * Read out the metadata for this partition to the Properties given
+   */
+  private void readFromFS(Properties properties) throws IOException {
+    // first try reading the text format (legacy, currently widespread)
+    boolean readFile = readTextFormatMetaFile(properties);
+    if (!readFile) {
+      // now try reading the base file formats
+      readFile = readBaseFormatMetaFile(properties);
+    }
+    if (!readFile) {
+      throw new HoodieException("Unable to read any partition meta file to locate the table timeline.");
+    }
+  }
+
+  private boolean readTextFormatMetaFile(Properties properties) {
     // Properties file format
     Path metafilePath = textFormatMetaFilePath(partitionPath);
     try (FSDataInputStream is = fs.open(metafilePath)) {
-      props.load(is);
+      properties.load(is);
       format = Option.empty();
       return true;
     } catch (Throwable t) {
@@ -220,14 +253,14 @@ public class HoodiePartitionMetadata {
     }
   }
 
-  private boolean readBaseFormatMetaFile() {
+  private boolean readBaseFormatMetaFile(Properties properties) {
     for (Path metafilePath : baseFormatMetaFilePaths(partitionPath)) {
       try {
         BaseFileUtils reader = BaseFileUtils.getInstance(metafilePath.toString());
         // Data file format
-        Map<String, String> metadata = reader.readFooter(fs.getConf(), true, metafilePath, PARTITION_DEPTH_KEY, COMMIT_TIME_KEY);
-        props.clear();
-        props.putAll(metadata);
+        Map<String, String> metadata = reader.readFooter(fs.getConf(), true, metafilePath, PARTITION_DEPTH_KEY, COMMIT_TIME_KEY, LAST_UPDATE_TIME_KEY);
+        properties.clear();
+        properties.putAll(metadata);
         format = Option.of(reader.getFormat());
         return true;
       } catch (Throwable t) {
@@ -241,11 +274,22 @@ public class HoodiePartitionMetadata {
    * Read out the COMMIT_TIME_KEY metadata for this partition.
    */
   public Option<String> readPartitionCreatedCommitTime() {
+    return readPartitionCommitTime(COMMIT_TIME_KEY);
+  }
+
+  /**
+   * Read out the LAST_UPDATE_TIME_KEY metadata for this partition.
+   */
+  public Option<String> readPartitionUpdatedCommitTime() {
+    return readPartitionCommitTime(LAST_UPDATE_TIME_KEY);
+  }
+
+  private Option<String> readPartitionCommitTime(String timeKey) {
     try {
-      if (!props.containsKey(COMMIT_TIME_KEY)) {
+      if (!props.containsKey(timeKey)) {
         readFromFS();
       }
-      return Option.of(props.getProperty(COMMIT_TIME_KEY));
+      return Option.ofNullable(props.getProperty(timeKey));
     } catch (IOException ioe) {
       LOG.warn("Error fetch Hoodie partition metadata for " + partitionPath, ioe);
       return Option.empty();

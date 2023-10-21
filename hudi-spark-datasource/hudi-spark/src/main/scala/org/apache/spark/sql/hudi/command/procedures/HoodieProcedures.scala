@@ -89,6 +89,13 @@ object HoodieProcedures {
       ,(ShowTablePropertiesProcedure.NAME, ShowTablePropertiesProcedure.builder)
       ,(HelpProcedure.NAME, HelpProcedure.builder)
       ,(ArchiveCommitsProcedure.NAME, ArchiveCommitsProcedure.builder)
+      ,(TtlConfigurationProcedure.NAME, TtlConfigurationProcedure.builder)
+      ,(TtlPolicyShowProcedure.NAME, TtlPolicyShowProcedure.builder)
+      ,(TtlPolicySaveProcedure.NAME, TtlPolicySaveProcedure.builder)
+      ,(TtlPolicyDeleteProcedure.NAME, TtlPolicyDeleteProcedure.builder)
+      ,(TtlPolicyEmptyProcedure.NAME, TtlPolicyEmptyProcedure.builder)
+      ,(TtlPolicyRunProcedure.NAME, TtlPolicyRunProcedure.builder)
+      ,(TtlUpdatePartitionsProcedure.NAME, TtlUpdatePartitionsProcedure.builder)
     )
   }
 }
