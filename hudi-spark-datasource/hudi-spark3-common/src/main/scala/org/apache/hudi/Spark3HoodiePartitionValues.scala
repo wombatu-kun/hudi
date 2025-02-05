@@ -24,7 +24,7 @@ import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.types.{DataType, Decimal}
 import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
 
-case class HoodiePartitionValues(values: InternalRow) extends InternalRow {
+case class Spark3HoodiePartitionValues(values: InternalRow) extends HoodiePartitionValues {
   override def numFields: Int = {
     values.numFields
   }
@@ -38,7 +38,7 @@ case class HoodiePartitionValues(values: InternalRow) extends InternalRow {
   }
 
   override def copy(): InternalRow = {
-    HoodiePartitionValues(values.copy())
+    Spark3HoodiePartitionValues(values.copy())
   }
 
   override def isNullAt(ordinal: Int): Boolean = {

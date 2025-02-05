@@ -19,14 +19,17 @@
 
 package org.apache.hudi
 
-import org.apache.hudi.common.table.cdc.HoodieCDCFileSplit
+import org.apache.hudi.common.model.FileSlice
 import org.apache.spark.sql.catalyst.InternalRow
 
-class HoodiePartitionCDCFileGroupMapping(partitionValues: InternalRow,
-                                         fileSplits: List[HoodieCDCFileSplit])
-  extends HoodiePartitionValues(partitionValues) {
+class Spark3HoodiePartitionFileSliceMapping(values: InternalRow,
+                                            slices: Map[String, FileSlice])
+  extends Spark3HoodiePartitionValues(values)
+  with HoodiePartitionFileSliceMapping {
 
-  def getFileSplits(): List[HoodieCDCFileSplit] = {
-    fileSplits
+  override def getSlice(fileId: String): Option[FileSlice] = {
+    slices.get(fileId)
   }
+
+  override def getPartitionValues: InternalRow = values
 }
