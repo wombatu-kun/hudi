@@ -538,9 +538,9 @@ object HoodieFileIndex extends Logging {
 
       // for simple bucket index, we need to set the INDEX_TYPE, BUCKET_INDEX_HASH_FIELD, BUCKET_INDEX_NUM_BUCKETS
       val dataBase = Some(tableConfig.getDatabaseName)
-      val tableName = tableConfig.getTableName
-      if (spark.catalog.tableExists(dataBase.getOrElse("default"), tableName)) {
-        val tableIdentifier = TableIdentifier(tableName, dataBase)
+      val qualifiedTableName = String.join(".", dataBase.getOrElse("default"), tableConfig.getTableName)
+      if (spark.catalog.tableExists(qualifiedTableName)) {
+        val tableIdentifier = TableIdentifier(qualifiedTableName)
         val table = HoodieCatalogTable(spark, tableIdentifier)
         table.catalogProperties.foreach(kv => properties.setProperty(kv._1, kv._2))
       }
