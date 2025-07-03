@@ -526,5 +526,6 @@
         </os>
       </activation>
     </profile>
+    <!--TODO add profile for Spark4 with proper dockerCompose.file -->
   </profiles>
 </project>
