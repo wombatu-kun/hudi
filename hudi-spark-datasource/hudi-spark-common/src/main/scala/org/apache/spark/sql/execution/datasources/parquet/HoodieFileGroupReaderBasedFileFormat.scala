@@ -133,7 +133,9 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
     val orcBatchSupported = conf.orcVectorizedReaderEnabled &&
       schema.forall(s => OrcUtils.supportColumnarReads(
         s.dataType, sparkSession.sessionState.conf.orcVectorizedReaderNestedColumnEnabled))
-    // TODO: Implement columnar batch reading https://github.com/apache/hudi/issues/17736
+    // TODO: [HUDI-8100] enable Lance columnar batch output to Spark query plan once
+    // HoodieFileGroupReader supports ColumnarBatch passthrough (currently it converts all
+    // batches to InternalRow via CloseableInternalRowIterator, making supportBatch=true unsafe)
     val lanceBatchSupported = false
 
     val supportBatch = if (isMultipleBaseFileFormatsEnabled) {
@@ -159,23 +161,31 @@ class HoodieFileGroupReaderBasedFileFormat(tablePath: String,
   override def vectorTypes(requiredSchema: StructType,
                            partitionSchema: StructType,
                            sqlConf: SQLConf): Option[Seq[String]] = {
-    val originalVectorTypes = super.vectorTypes(requiredSchema, partitionSchema, sqlConf)
-    if (mandatoryFields.isEmpty) {
-      originalVectorTypes
+    if (hoodieFileFormat == HoodieFileFormat.LANCE) {
+      // Lance uses LanceArrowColumnVector (and ConstantColumnVector for partition/null columns),
+      // neither of which extends OnHeapColumnVector. Returning None tells Spark codegen to use
+      // the abstract ColumnVector interface instead of generating an OnHeapColumnVector cast,
+      // which would throw ClassCastException at runtime.
+      None
     } else {
-      val regularVectorType = if (!sqlConf.offHeapColumnVectorEnabled) {
-        classOf[OnHeapColumnVector].getName
+      val originalVectorTypes = super.vectorTypes(requiredSchema, partitionSchema, sqlConf)
+      if (mandatoryFields.isEmpty) {
+        originalVectorTypes
       } else {
-        classOf[OffHeapColumnVector].getName
-      }
-      originalVectorTypes.map {
-        o: Seq[String] => o.zipWithIndex.map(a => {
-          if (a._2 >= requiredSchema.length && mandatoryFields.contains(partitionSchema.fields(a._2 - requiredSchema.length).name)) {
-            regularVectorType
-          } else {
-            a._1
-          }
-        })
+        val regularVectorType = if (!sqlConf.offHeapColumnVectorEnabled) {
+          classOf[OnHeapColumnVector].getName
+        } else {
+          classOf[OffHeapColumnVector].getName
+        }
+        originalVectorTypes.map {
+          o: Seq[String] => o.zipWithIndex.map(a => {
+            if (a._2 >= requiredSchema.length && mandatoryFields.contains(partitionSchema.fields(a._2 - requiredSchema.length).name)) {
+              regularVectorType
+            } else {
+              a._1
+            }
+          })
+        }
       }
     }
   }

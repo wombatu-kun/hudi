@@ -19,11 +19,37 @@
 
 package org.apache.spark.sql.vectorized;
 
+import org.apache.spark.sql.catalyst.InternalRow;
+import org.apache.spark.sql.execution.vectorized.ColumnVectorUtils;
+import org.apache.spark.sql.execution.vectorized.ConstantColumnVector;
+import org.apache.spark.sql.types.DataType;
 import org.apache.spark.sql.types.StructType;
 
 import java.util.function.UnaryOperator;
 
 public class ColumnarBatchUtils {
+
+  /**
+   * Create a {@link ColumnVector} of {@code numRows} rows where every value is null.
+   * Uses {@link ConstantColumnVector} for memory efficiency.
+   */
+  public static ColumnVector createNullVector(int numRows, DataType dataType) {
+    ConstantColumnVector vec = new ConstantColumnVector(numRows, dataType);
+    vec.setNull();
+    return vec;
+  }
+
+  /**
+   * Create a constant {@link ColumnVector} of {@code numRows} rows, all set to the value at
+   * {@code fieldIdx} in {@code partitionValues}.  Uses {@link ColumnVectorUtils#populate}
+   * which requires {@link ConstantColumnVector} as of Spark 3.4+.
+   */
+  public static ColumnVector createPartitionVector(int numRows, DataType dataType,
+                                                   InternalRow partitionValues, int fieldIdx) {
+    ConstantColumnVector vec = new ConstantColumnVector(numRows, dataType);
+    ColumnVectorUtils.populate(vec, partitionValues, fieldIdx);
+    return vec;
+  }
 
   public static UnaryOperator<ColumnarBatch> generateProjection(StructType from, StructType to) {
     if (from.length() < to.length()) {
