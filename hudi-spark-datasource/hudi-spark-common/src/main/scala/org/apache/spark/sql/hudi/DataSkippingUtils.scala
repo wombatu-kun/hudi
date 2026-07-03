@@ -28,6 +28,7 @@ import org.apache.spark.sql.functions.col
 import org.apache.spark.sql.hudi.ColumnStatsExpressionUtils._
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.{AnalysisException, HoodieCatalystExpressionUtils}
+import org.apache.spark.sql.hudi.command.exception.HoodieAnalysisException
 import org.apache.spark.unsafe.types.UTF8String
 
 object DataSkippingUtils extends Logging {
@@ -340,19 +341,19 @@ object DataSkippingUtils extends Logging {
       case Alias(c, _) => getTargetColNameParts(c)
       case GetStructField(c, _, Some(name)) => getTargetColNameParts(c) :+ name
       case ex: ExtractValue =>
-        throw new AnalysisException(s"convert reference to name failed, Updating nested fields is only supported for StructType: ${ex}.")
+        throw new HoodieAnalysisException(s"convert reference to name failed, Updating nested fields is only supported for StructType: ${ex}.")
       case other =>
-        throw new AnalysisException(s"convert reference to name failed,  Found unsupported expression ${other}")
+        throw new HoodieAnalysisException(s"convert reference to name failed,  Found unsupported expression ${other}")
     }
   }
 }
 
 object ColumnStatsExpressionUtils {
 
-  @inline def genColMinValueExpr(colName: String): Expression = col(getMinColumnNameFor(colName)).expr
-  @inline def genColMaxValueExpr(colName: String): Expression = col(getMaxColumnNameFor(colName)).expr
-  @inline def genColNumNullsExpr(colName: String): Expression = col(getNullCountColumnNameFor(colName)).expr
-  @inline def genColValueCountExpr: Expression = col(getValueCountColumnNameFor).expr
+  @inline def genColMinValueExpr(colName: String): Expression = SparkAdapterSupport.sparkAdapter.getExpressionFromColumn(col(getMinColumnNameFor(colName)))
+  @inline def genColMaxValueExpr(colName: String): Expression = SparkAdapterSupport.sparkAdapter.getExpressionFromColumn(col(getMaxColumnNameFor(colName)))
+  @inline def genColNumNullsExpr(colName: String): Expression = SparkAdapterSupport.sparkAdapter.getExpressionFromColumn(col(getNullCountColumnNameFor(colName)))
+  @inline def genColValueCountExpr: Expression = SparkAdapterSupport.sparkAdapter.getExpressionFromColumn(col(getValueCountColumnNameFor))
 
   @inline def genColumnValuesEqualToExpression(colName: String,
                                                value: Expression,

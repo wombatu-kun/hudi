@@ -414,7 +414,7 @@ public abstract class MultipleSparkJobExecutionStrategy<T>
     List<ClusteringOperation> clusteringOps = clusteringGroup.getSlices().stream()
         .map(ClusteringOperation::create).collect(Collectors.toList());
     boolean hasLogFiles = clusteringOps.stream().anyMatch(op -> op.getDeltaFilePaths().size() > 0);
-    SQLContext sqlContext = new SQLContext(jsc.sc());
+    SQLContext sqlContext = SQLContext.getOrCreate(jsc.sc());
 
     StoragePath[] baseFilePaths = clusteringOps
         .stream()

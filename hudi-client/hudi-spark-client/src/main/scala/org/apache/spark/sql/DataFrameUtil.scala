@@ -18,22 +18,26 @@
 
 package org.apache.spark.sql
 
-import org.apache.hudi.SparkAdapterSupport
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.execution.LogicalRDD
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.types.StructType
 
-object DataFrameUtil {
+/**
+ * Utilities for building a [[DataFrame]] out of an RDD[InternalRow] such as the one obtained via
+ * `df.queryExecution.toRdd`.
+ *
+ * The concrete implementation is Spark-version specific (see the Spark3/Spark4 variants in the
+ * per-version modules), because the underlying [[Dataset]] factory moved packages in Spark 4.
+ * Obtain the active implementation through [[org.apache.spark.sql.hudi.SparkAdapter#getDataFrameUtil]].
+ */
+trait DataFrameUtil {
+  def createFromInternalRows(sparkSession: SparkSession, schema: StructType, rdd: RDD[InternalRow]): DataFrame
 
   /**
-   * Creates a DataFrame out of RDD[InternalRow] that you can get
-   * using `df.queryExecution.toRdd`
+   * Builds a [[DataFrame]] out of an analyzed [[LogicalPlan]]. This is the Spark-version-safe
+   * replacement for a direct `Dataset.ofRows(spark, plan)` call, whose `Dataset` companion moved to
+   * the `org.apache.spark.sql.classic` package in Spark 4.
    */
-  def createFromInternalRows(sparkSession: SparkSession, schema:
-  StructType, rdd: RDD[InternalRow]): DataFrame = {
-    val logicalPlan = LogicalRDD(
-      SparkAdapterSupport.sparkAdapter.getSchemaUtils.toAttributes(schema), rdd)(sparkSession)
-    Dataset.ofRows(sparkSession, logicalPlan)
-  }
+  def ofRows(sparkSession: SparkSession, logicalPlan: LogicalPlan): DataFrame
 }

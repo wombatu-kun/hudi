@@ -22,15 +22,15 @@ import org.apache.hudi.common.model.HoodieRecord
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{DataFrameUtil, Dataset, Row, SparkSession}
+import org.apache.spark.sql.{Dataset, Row, SparkSession}
 
-object SparkConversionUtils {
+object SparkConversionUtils extends SparkAdapterSupport {
 
   def createDataFrame[T](rdd: RDD[HoodieRecord[T]], ss: SparkSession, structType: StructType): Dataset[Row] = {
     if (rdd.isEmpty()) {
       ss.emptyDataFrame
     } else {
-      DataFrameUtil.createFromInternalRows(ss, structType, rdd.map(_.getData.asInstanceOf[InternalRow]))
+      sparkAdapter.getDataFrameUtil.createFromInternalRows(ss, structType, rdd.map(_.getData.asInstanceOf[InternalRow]))
     }
   }
 }

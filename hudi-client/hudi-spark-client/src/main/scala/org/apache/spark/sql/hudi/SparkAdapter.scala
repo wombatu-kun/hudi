@@ -20,31 +20,39 @@ package org.apache.spark.sql.hudi
 
 import org.apache.avro.Schema
 import org.apache.hadoop.fs.{FileStatus, Path}
+import org.apache.hudi.PartitionFileSliceMapping
+import org.apache.hudi.client.model.HoodieInternalRow
 import org.apache.hudi.client.utils.SparkRowSerDe
+import org.apache.hudi.common.model.FileSlice
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.storage.StoragePath
 
 import org.apache.avro.Schema
 import org.apache.hadoop.conf.Configuration
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.avro.{HoodieAvroDeserializer, HoodieAvroSchemaConverters, HoodieAvroSerializer}
 import org.apache.spark.sql.catalyst.analysis.EliminateSubqueryAliases
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, InterpretedPredicate}
-import org.apache.spark.sql.catalyst.parser.ParserInterface
+import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
+import org.apache.spark.sql.catalyst.trees.Origin
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical.{Command, LogicalPlan}
 import org.apache.spark.sql.catalyst.util.DateFormatter
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
+import org.apache.spark.sql.jdbc.JdbcDialect
 import org.apache.spark.sql.parser.HoodieExtendedParserInterface
 import org.apache.spark.sql.sources.{BaseRelation, Filter}
 import org.apache.spark.sql.types.{DataType, Metadata, StructType}
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.unsafe.types.UTF8String
 
+import java.sql.{Connection, ResultSet}
 import java.util.{Locale, TimeZone}
 
 /**
@@ -90,6 +98,83 @@ trait SparkAdapter extends Serializable {
    * Returns an instance of [[HoodieSchemaUtils]] providing schema utils.
    */
   def getSchemaUtils: HoodieSchemaUtils
+
+  /**
+   * Returns an instance of [[DataFrameUtil]] for creating [[DataFrame]]s from low-level Spark
+   * constructs in a Spark-version-neutral way.
+   */
+  def getDataFrameUtil: DataFrameUtil
+
+  /**
+   * Returns an instance of [[HoodieUnsafeUtils]] for handling [[org.apache.hudi.HoodieUnsafeRDD]]s
+   * in a Spark-version-neutral way.
+   */
+  def getUnsafeUtils: HoodieUnsafeUtils
+
+  /**
+   * Returns an instance of [[HoodieUTF8StringFactory]] for wrapping [[org.apache.spark.unsafe.types.UTF8String]]s
+   * into comparable values in a Spark-version-neutral way (Spark 4 disables UTF8String.compareTo).
+   */
+  def getUTF8StringFactory: HoodieUTF8StringFactory
+
+  /**
+   * Creates a [[DataFrame]] from the given [[RDD]] of [[InternalRow]]s and [[schema]], delegating to
+   * Spark's (package-private) [[SparkSession#internalCreateDataFrame]], which moved packages in Spark 4.
+   */
+  def internalCreateDataFrame(spark: SparkSession, rdd: RDD[InternalRow], schema: StructType,
+                              isStreaming: Boolean = false): DataFrame
+
+  /**
+   * Creates a Spark-version-specific concrete [[HoodieInternalRow]] overlaying the given meta-fields
+   * on top of [[sourceRow]]. [[HoodieInternalRow]] is abstract because Spark 4 added an abstract
+   * `getVariant` to [[org.apache.spark.sql.catalyst.expressions.SpecializedGetters]].
+   */
+  def createInternalRow(metaFields: Array[UTF8String],
+                        sourceRow: InternalRow,
+                        sourceContainsMetaFields: Boolean): HoodieInternalRow
+
+  /**
+   * Convenience overload building the meta-field array from the individual Hudi meta columns.
+   */
+  def createInternalRow(commitTime: UTF8String,
+                        commitSeqNumber: UTF8String,
+                        recordKey: UTF8String,
+                        partitionPath: UTF8String,
+                        fileName: UTF8String,
+                        sourceRow: InternalRow,
+                        sourceContainsMetaFields: Boolean): HoodieInternalRow =
+    createInternalRow(Array(commitTime, commitSeqNumber, recordKey, partitionPath, fileName),
+      sourceRow, sourceContainsMetaFields)
+
+  /**
+   * Creates a Spark-version-specific concrete [[PartitionFileSliceMapping]] overlaying the given
+   * file-slice [[slices]] on top of the partition-values [[internalRow]]. [[PartitionFileSliceMapping]]
+   * is abstract for the same reason [[HoodieInternalRow]] is: Spark 4 added an abstract `getVariant`
+   * to [[org.apache.spark.sql.catalyst.expressions.SpecializedGetters]].
+   */
+  def createPartitionFileSliceMapping(internalRow: InternalRow,
+                                      slices: Map[String, FileSlice]): PartitionFileSliceMapping
+
+  /**
+   * Returns the Catalyst schema for a JDBC [[ResultSet]] in a Spark-version-neutral way. Spark 4.0
+   * added a leading [[Connection]] parameter to the underlying JdbcUtils.getSchema; the Spark 3 impl
+   * ignores the connection while the Spark 4 impl forwards it.
+   */
+  def getJdbcSchema(connection: Connection, resultSet: ResultSet, dialect: JdbcDialect,
+                    alwaysNullable: Boolean): StructType
+
+  /**
+   * Creates a [[Column]] wrapping the given Catalyst [[Expression]] in a Spark-version-neutral way.
+   * Spark 4 backs [[Column]] with an [[org.apache.spark.sql.internal.ColumnNode]] rather than an
+   * [[Expression]], so `new Column(expr)` no longer compiles across versions.
+   */
+  def createColumnFromExpression(expression: Expression): Column
+
+  /**
+   * Extracts the Catalyst [[Expression]] underlying the given [[Column]] in a Spark-version-neutral way.
+   * Spark 4 removed the public `Column#expr` accessor.
+   */
+  def getExpressionFromColumn(column: Column): Expression
 
   /**
    * Creates instance of [[HoodieAvroSerializer]] providing for ability to serialize
@@ -149,7 +234,9 @@ trait SparkAdapter extends Serializable {
       case plan if !plan.resolved => None
       // NOTE: When resolving Hudi table we allow [[Filter]]s and [[Project]]s be applied
       //       on top of it
-      case PhysicalOperation(_, _, LogicalRelation(_, _, Some(table), _)) if isHoodieTable(table) => Some(table)
+      // NOTE: matched positionally-agnostically ([[LogicalRelation]] gained a `stream` field in
+      //       Spark 4), extracting the catalog table through the stable `catalogTable` accessor
+      case PhysicalOperation(_, _, lr: LogicalRelation) if lr.catalogTable.exists(isHoodieTable) => lr.catalogTable
       case _ => None
     }
   }
@@ -219,4 +306,13 @@ trait SparkAdapter extends Serializable {
    * Tries to translate a Catalyst Expression into data source Filter
    */
   def translateFilter(predicate: Expression, supportNestedPredicatePushdown: Boolean = false): Option[Filter]
+
+  /**
+   * Creates a [[ParseException]] carrying proper location information. Abstracts over the constructor
+   * differences between Spark 3.x (message-based) and Spark 4.x (error-class-based).
+   */
+  def newParseException(command: Option[String],
+                        exception: AnalysisException,
+                        start: Origin,
+                        stop: Origin): ParseException
 }

@@ -26,7 +26,7 @@ import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.functional.ColumnStatIndexTestBase.ColumnStatsTestCase
 import org.apache.hudi.storage.StoragePath
 import org.apache.hudi.testutils.HoodieSparkClientTestBase
-import org.apache.hudi.{ColumnStatsIndexSupport, DataSourceWriteOptions}
+import org.apache.hudi.{ColumnStatsIndexSupport, DataSourceWriteOptions, HoodieSparkUtils}
 
 import org.apache.spark.sql._
 import org.apache.spark.sql.functions.typedLit
@@ -126,7 +126,7 @@ class ColumnStatIndexTestBase extends HoodieSparkClientTestBase {
       files.flatMap(file => {
         val df = spark.read.schema(sourceTableSchema).parquet(file.getPath.toString)
         val exprs: Seq[String] =
-          s"'${typedLit(file.getPath.getName)}' AS file" +:
+          s"${if (HoodieSparkUtils.gteqSpark4_0) typedLit(file.getPath.getName) else "'" + typedLit(file.getPath.getName) + "'"} AS file" +:
             s"sum(1) AS valueCount" +:
             df.columns
               .filter(col => includedCols.contains(col))

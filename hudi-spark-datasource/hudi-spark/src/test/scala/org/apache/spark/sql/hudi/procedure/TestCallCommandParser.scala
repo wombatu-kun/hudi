@@ -83,7 +83,7 @@ class TestCallCommandParser extends HoodieSparkSqlTestBase {
 
   test("Test Call Parse Error") {
     if (HoodieSparkUtils.gteqSpark3_3) {
-      checkParseExceptionContain("CALL cat.system radish kebab")("Syntax error at or near 'CALL'")
+      checkParseExceptionContain("CALL cat.system radish kebab")(s"Syntax error at or near '${if (HoodieSparkUtils.gteqSpark4_0) "radish" else "CALL"}'")
     } else {
       checkParseExceptionContain("CALL cat.system radish kebab")("mismatched input 'CALL' expecting")
     }

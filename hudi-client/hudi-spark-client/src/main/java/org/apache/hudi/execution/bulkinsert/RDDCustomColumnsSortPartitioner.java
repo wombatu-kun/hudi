@@ -18,6 +18,7 @@
 
 package org.apache.hudi.execution.bulkinsert;
 
+import org.apache.hudi.SparkAdapterSupport$;
 import org.apache.hudi.common.config.SerializableSchema;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.util.collection.FlatLists;
@@ -26,6 +27,7 @@ import org.apache.hudi.table.BulkInsertPartitioner;
 
 import org.apache.avro.Schema;
 import org.apache.spark.api.java.JavaRDD;
+import org.apache.spark.sql.HoodieUTF8StringFactory;
 
 import java.util.Arrays;
 
@@ -41,6 +43,8 @@ public class RDDCustomColumnsSortPartitioner<T>
   private final String[] sortColumnNames;
   private final SerializableSchema serializableSchema;
   private final boolean consistentLogicalTimestampEnabled;
+  private final HoodieUTF8StringFactory utf8StringFactory =
+      SparkAdapterSupport$.MODULE$.sparkAdapter().getUTF8StringFactory();
 
   public RDDCustomColumnsSortPartitioner(HoodieWriteConfig config) {
     this.serializableSchema = new SerializableSchema(new Schema.Parser().parse(config.getSchema()));
@@ -60,11 +64,13 @@ public class RDDCustomColumnsSortPartitioner<T>
     final String[] sortColumns = this.sortColumnNames;
     final SerializableSchema schema = this.serializableSchema;
     final boolean consistentLogicalTimestampEnabled = this.consistentLogicalTimestampEnabled;
+    final HoodieUTF8StringFactory utf8StringFactory = this.utf8StringFactory;
     return records.sortBy(
         record -> FlatLists.ofComparableArray(
-            BulkInsertPartitioner.prependPartitionPath(
-                record.getPartitionPath(),
-                record.getColumnValues(schema.get(), sortColumns, consistentLogicalTimestampEnabled))
+            utf8StringFactory.wrapArrayOfObjects(
+                BulkInsertPartitioner.prependPartitionPath(
+                    record.getPartitionPath(),
+                    record.getColumnValues(schema.get(), sortColumns, consistentLogicalTimestampEnabled)))
         ), true, outputSparkPartitions);
   }
 

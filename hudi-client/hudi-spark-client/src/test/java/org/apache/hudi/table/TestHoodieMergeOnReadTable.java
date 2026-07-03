@@ -695,9 +695,9 @@ public class TestHoodieMergeOnReadTable extends SparkClientFunctionalTestHarness
       BaseSparkDeltaCommitActionExecutor actionExecutor = new SparkDeleteDeltaCommitActionExecutor(context(), cfg, hoodieTable,
           newDeleteTime, HoodieJavaRDD.of(deleteRDD));
       actionExecutor.getUpsertPartitioner(new WorkloadProfile(buildProfile(deleteRDD)));
-      final List<List<WriteStatus>> deleteStatus = jsc().parallelize(Arrays.asList(1)).map(x -> {
-        return actionExecutor.handleUpdate(partitionPath, fileId, fewRecordsForDelete.iterator());
-      }).map(Transformations::flatten).collect();
+      final List<List<WriteStatus>> deleteStatus = jsc().parallelize(Arrays.asList(1))
+          .map(x -> actionExecutor.handleUpdate(partitionPath, fileId, fewRecordsForDelete.iterator()))
+          .map(it -> (List<WriteStatus>) Transformations.flatten(it)).collect();
 
       // Verify there are  errors because records are from multiple partitions (but handleUpdate is invoked for
       // specific partition)

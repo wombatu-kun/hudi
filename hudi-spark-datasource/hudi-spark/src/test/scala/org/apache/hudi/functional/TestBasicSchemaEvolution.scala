@@ -27,10 +27,10 @@ import org.apache.hudi.exception.SchemaCompatibilityException
 import org.apache.hudi.functional.TestBasicSchemaEvolution.{dropColumn, injectColumnAt}
 import org.apache.hudi.testutils.HoodieSparkClientTestBase
 import org.apache.hudi.util.JFunction
-import org.apache.hudi.{AvroConversionUtils, DataSourceWriteOptions, ScalaAssertionSupport}
+import org.apache.hudi.{AvroConversionUtils, DataSourceWriteOptions, ScalaAssertionSupport, SparkAdapterSupport}
 import org.apache.spark.sql.hudi.HoodieSparkSessionExtension
 import org.apache.spark.sql.types.{IntegerType, LongType, StringType, StructField, StructType}
-import org.apache.spark.sql.{HoodieUnsafeUtils, Row, SaveMode, SparkSession, SparkSessionExtensions, functions}
+import org.apache.spark.sql.{Row, SaveMode, SparkSession, SparkSessionExtensions, functions}
 import org.junit.jupiter.api.Assertions.{assertEquals, assertTrue}
 import org.junit.jupiter.api.{AfterEach, BeforeEach}
 import org.junit.jupiter.params.ParameterizedTest
@@ -39,7 +39,7 @@ import org.junit.jupiter.params.provider.CsvSource
 import java.util.function.Consumer
 import scala.collection.JavaConverters._
 
-class TestBasicSchemaEvolution extends HoodieSparkClientTestBase with ScalaAssertionSupport {
+class TestBasicSchemaEvolution extends HoodieSparkClientTestBase with ScalaAssertionSupport with SparkAdapterSupport {
 
   var spark: SparkSession = null
   val commonOpts = Map(
@@ -107,7 +107,7 @@ class TestBasicSchemaEvolution extends HoodieSparkClientTestBase with ScalaAsser
       )
 
     def appendData(schema: StructType, batch: Seq[Row], shouldAllowDroppedColumns: Boolean = false): Unit = {
-      HoodieUnsafeUtils.createDataFrameFromRows(spark, batch, schema)
+      sparkAdapter.getUnsafeUtils.createDataFrameFromRows(spark, batch, schema)
         .write
         .format("org.apache.hudi")
         .options(opts ++ Map(HoodieWriteConfig.SCHEMA_ALLOW_AUTO_EVOLUTION_COLUMN_DROP.key -> shouldAllowDroppedColumns.toString))
@@ -154,7 +154,7 @@ class TestBasicSchemaEvolution extends HoodieSparkClientTestBase with ScalaAsser
       Row("2", "Lisi", "Wallace", 1, 1),
       Row("3", "Zhangsan", "Shu", 1, 1))
 
-    HoodieUnsafeUtils.createDataFrameFromRows(spark, firstBatch, firstSchema)
+    sparkAdapter.getUnsafeUtils.createDataFrameFromRows(spark, firstBatch, firstSchema)
       .write
       .format("org.apache.hudi")
       .options(opts)

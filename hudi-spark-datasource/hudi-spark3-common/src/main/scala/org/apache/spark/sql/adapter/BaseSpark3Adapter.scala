@@ -17,26 +17,36 @@
 
 package org.apache.spark.sql.adapter
 
+import org.apache.hudi.client.model.{HoodieInternalRow, Spark3HoodieInternalRow}
 import org.apache.hudi.client.utils.SparkRowSerDe
+import org.apache.hudi.common.model.FileSlice
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.common.util.JsonUtils
 import org.apache.hudi.spark3.internal.ReflectUtil
 import org.apache.hudi.storage.StoragePath
-import org.apache.hudi.{AvroConversionUtils, DefaultSource, HoodieSparkUtils, Spark3RowSerDe}
+import org.apache.hudi.{AvroConversionUtils, DefaultSource, HoodieSparkUtils, PartitionFileSliceMapping, Spark3PartitionFileSliceMapping, Spark3RowSerDe}
 
 import org.apache.avro.Schema
 import org.apache.spark.internal.Logging
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.avro.{HoodieAvroSchemaConverters, HoodieSparkAvroSchemaConverters}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Expression, InterpretedPredicate, Predicate}
+import org.apache.spark.sql.catalyst.parser.ParseException
+import org.apache.spark.sql.catalyst.trees.Origin
 import org.apache.spark.sql.catalyst.util.DateFormatter
 import org.apache.spark.sql.execution.datasources._
+import org.apache.spark.sql.execution.datasources.jdbc.JdbcUtils
 import org.apache.spark.sql.hudi.SparkAdapter
+import org.apache.spark.sql.jdbc.JdbcDialect
 import org.apache.spark.sql.sources.{BaseRelation, Filter}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
-import org.apache.spark.sql.{HoodieSpark3CatalogUtils, SQLContext, SparkSession}
+import org.apache.spark.sql.{AnalysisException, Column, DataFrame, DataFrameUtil, HoodieSpark3CatalogUtils, HoodieUnsafeUtils, HoodieUTF8StringFactory, SQLContext, Spark3DataFrameUtil, Spark3HoodieUnsafeUtils, Spark3HoodieUTF8StringFactory, SparkSession}
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.unsafe.types.UTF8String
 
+import java.sql.{Connection, ResultSet}
 import java.time.ZoneId
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
@@ -99,5 +109,41 @@ abstract class BaseSpark3Adapter extends SparkAdapter with Logging {
 
   override def makeColumnarBatch(vectors: Array[ColumnVector], numRows: Int): ColumnarBatch = {
     new ColumnarBatch(vectors, numRows)
+  }
+
+  override def getDataFrameUtil: DataFrameUtil = Spark3DataFrameUtil
+
+  override def getUnsafeUtils: HoodieUnsafeUtils = Spark3HoodieUnsafeUtils
+
+  override def getUTF8StringFactory: HoodieUTF8StringFactory = Spark3HoodieUTF8StringFactory
+
+  override def internalCreateDataFrame(spark: SparkSession,
+                                       rdd: RDD[InternalRow],
+                                       schema: StructType,
+                                       isStreaming: Boolean = false): DataFrame =
+    spark.internalCreateDataFrame(rdd, schema, isStreaming)
+
+  override def createInternalRow(metaFields: Array[UTF8String],
+                                 sourceRow: InternalRow,
+                                 sourceContainsMetaFields: Boolean): HoodieInternalRow =
+    new Spark3HoodieInternalRow(metaFields, sourceRow, sourceContainsMetaFields)
+
+  override def createPartitionFileSliceMapping(internalRow: InternalRow,
+                                               slices: Map[String, FileSlice]): PartitionFileSliceMapping =
+    new Spark3PartitionFileSliceMapping(internalRow, slices)
+
+  override def getJdbcSchema(connection: Connection, resultSet: ResultSet, dialect: JdbcDialect,
+                             alwaysNullable: Boolean): StructType =
+    JdbcUtils.getSchema(resultSet, dialect, alwaysNullable, false)
+
+  override def createColumnFromExpression(expression: Expression): Column = new Column(expression)
+
+  override def getExpressionFromColumn(column: Column): Expression = column.expr
+
+  override def newParseException(command: Option[String],
+                                 exception: AnalysisException,
+                                 start: Origin,
+                                 stop: Origin): ParseException = {
+    new ParseException(command, exception.getMessage, start, stop)
   }
 }

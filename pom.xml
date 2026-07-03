@@ -96,6 +96,7 @@
     <java.version>1.8</java.version>
     <kryo.shaded.version>4.0.2</kryo.shaded.version>
     <fasterxml.spark3.version>2.10.0</fasterxml.spark3.version>
+    <fasterxml.spark4.version>2.17.1</fasterxml.spark4.version>
     <fasterxml.version>${fasterxml.spark3.version}</fasterxml.version>
     <fasterxml.jackson.databind.version>${fasterxml.spark3.version}</fasterxml.jackson.databind.version>
     <fasterxml.jackson.module.scala.version>${fasterxml.spark3.version}</fasterxml.jackson.module.scala.version>
@@ -162,6 +163,7 @@
     <flink.hadoop.compatibility.artifactId>flink-hadoop-compatibility_2.12</flink.hadoop.compatibility.artifactId>
     <rocksdbjni.version>7.5.3</rocksdbjni.version>
     <spark35.version>3.5.1</spark35.version>
+    <spark40.version>4.0.0</spark40.version>
     <hudi.spark.module>hudi-spark3.5.x</hudi.spark.module>
     <!-- NOTE: Different Spark versions might require different number of shared
                modules being incorporated, hence we're creating multiple placeholders
@@ -181,6 +183,7 @@
     <scala-maven-plugin.version>3.3.1</scala-maven-plugin.version>
     <scalatest.spark_pre31.version>3.0.1</scalatest.spark_pre31.version>
     <scalatest.spark3.version>3.1.0</scalatest.spark3.version>
+    <scalatest.spark4.version>3.1.4</scalatest.spark4.version>
     <scalatest.version>${scalatest.spark3.version}</scalatest.version>
     <surefire-log4j.file>log4j2-surefire.properties</surefire-log4j.file>
     <thrift.version>0.12.0</thrift.version>
@@ -195,6 +198,7 @@
     <skipFTs>${skipTests}</skipFTs>
     <skipITs>${skipTests}</skipITs>
     <skip.hudi-spark3.unit.tests>${skipTests}</skip.hudi-spark3.unit.tests>
+    <skip.hudi-spark4.unit.tests>${skipTests}</skip.hudi-spark4.unit.tests>
     <skipDocker>${skipTests}</skipDocker>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <main.basedir>${project.basedir}</main.basedir>
@@ -2374,6 +2378,73 @@
         <activeByDefault>true</activeByDefault>
         <property>
           <name>spark3.5</name>
+        </property>
+      </activation>
+    </profile>
+
+    <profile>
+      <id>spark4.0</id>
+      <properties>
+        <spark4.version>${spark40.version}</spark4.version>
+        <spark.version>${spark4.version}</spark.version>
+        <sparkbundle.version>4.0</sparkbundle.version>
+        <scala13.version>2.13.14</scala13.version>
+        <scala.version>${scala13.version}</scala.version>
+        <scala.binary.version>2.13</scala.binary.version>
+        <hudi.spark.module>hudi-spark4.0.x</hudi.spark.module>
+        <!-- This glob has to include hudi-spark4-common -->
+        <hudi.spark.common.modules.1>hudi-spark4-common</hudi.spark.common.modules.1>
+        <hudi.spark.common.modules.2></hudi.spark.common.modules.2>
+        <scalatest.version>${scalatest.spark4.version}</scalatest.version>
+        <!-- Keep Hadoop at the 0.15 default (2.10.2). Spark 4.0 provides its own shaded
+             Hadoop 3.4 client at runtime; bumping the compile-time Hadoop here only churns
+             core transitive deps (drops jsr305, adds banned logback) with no benefit. -->
+        <kafka.version>3.8.0</kafka.version>
+        <hive.storage.version>2.8.1</hive.storage.version>
+        <!-- NOTE: Some Hudi modules require standalone Parquet/Orc/etc file-format dependency (hudi-hive-sync,
+                   hudi-hadoop-mr, for ex). Since these Hudi modules might be used from w/in the execution engine(s)
+                   bringing these file-formats as dependencies as well, we need to make sure that versions are
+                   synchronized to avoid classpath ambiguity -->
+        <!-- Parquet is bumped to Spark 4.0's level (needed by the spark4 shim's parquet reader).
+             Orc/Avro stay at the 0.15 (spark3.5) level: core compiles against them and Spark 4
+             provides its own newer Orc/Avro at runtime, so bumping here only churns core. -->
+        <parquet.version>1.15.2</parquet.version>
+        <orc.spark.version>2.1.2</orc.spark.version>
+        <avro.version>1.12.0</avro.version>
+        <antlr.version>4.13.1</antlr.version>
+        <fasterxml.spark4.version>2.18.2</fasterxml.spark4.version>
+        <fasterxml.version>${fasterxml.spark4.version}</fasterxml.version>
+        <fasterxml.jackson.databind.version>${fasterxml.spark4.version}</fasterxml.jackson.databind.version>
+        <fasterxml.jackson.module.scala.version>${fasterxml.spark4.version}</fasterxml.jackson.module.scala.version>
+        <fasterxml.jackson.dataformat.yaml.version>${fasterxml.spark4.version}</fasterxml.jackson.dataformat.yaml.version>
+        <!-- Spark 4.0 moved its web UI to jakarta.servlet and ships Jersey 3.0.16; the global
+             glassfish.version (2.17, javax.servlet) downgrades it, so SparkContext init fails with
+             "ServletContainer is not a jakarta.servlet.Servlet". Only source-referenced by tests. -->
+        <glassfish.version>3.0.16</glassfish.version>
+        <log4j2.version>2.20.0</log4j2.version>
+        <slf4j.version>2.0.7</slf4j.version>
+        <skipITs>true</skipITs>
+      </properties>
+      <modules>
+        <module>hudi-spark-datasource/hudi-spark4.0.x</module>
+        <module>hudi-spark-datasource/hudi-spark4-common</module>
+      </modules>
+      <dependencies>
+        <dependency>
+          <groupId>org.slf4j</groupId>
+          <artifactId>slf4j-log4j12</artifactId>
+          <version>${slf4j.version}</version>
+          <scope>test</scope>
+        </dependency>
+        <dependency>
+          <groupId>${hive.groupid}</groupId>
+          <artifactId>hive-storage-api</artifactId>
+          <version>${hive.storage.version}</version>
+        </dependency>
+      </dependencies>
+      <activation>
+        <property>
+          <name>spark4.0</name>
         </property>
       </activation>
     </profile>

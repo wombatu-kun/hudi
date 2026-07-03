@@ -18,12 +18,13 @@
 
 package org.apache.spark.sql
 
+import org.apache.hudi.SparkAdapterSupport
 import org.apache.hudi.common.model.HoodieRecord
 import org.apache.hudi.index.bucket.BucketIdentifier
 import org.apache.spark.Partitioner
 import org.apache.spark.sql.catalyst.InternalRow
 
-object BucketPartitionUtils {
+object BucketPartitionUtils extends SparkAdapterSupport {
   def createDataFrame(df: DataFrame, indexKeyFields: String, bucketNum: Int, partitionNum: Int): DataFrame = {
     def getPartitionKeyExtractor(): InternalRow => (String, Int) = row => {
       val kb = BucketIdentifier
@@ -51,6 +52,6 @@ object BucketPartitionUtils {
       .keyBy(row => getPartitionKey(row))
       .repartitionAndSortWithinPartitions(partitioner)
       .values
-    df.sparkSession.internalCreateDataFrame(reRdd, df.schema)
+    sparkAdapter.internalCreateDataFrame(df.sparkSession, reRdd, df.schema)
   }
 }

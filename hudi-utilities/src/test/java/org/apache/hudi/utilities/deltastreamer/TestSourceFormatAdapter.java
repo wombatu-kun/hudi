@@ -47,6 +47,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
+import java.io.IOException;
 import java.util.stream.Stream;
 
 import static org.apache.hudi.testutils.HoodieClientTestUtils.getSparkConfForTest;
@@ -71,7 +72,7 @@ public class TestSourceFormatAdapter {
   }
 
   @AfterAll
-  public static void shutdown() {
+  public static void shutdown() throws IOException {
     jsc.close();
     spark.close();
   }
