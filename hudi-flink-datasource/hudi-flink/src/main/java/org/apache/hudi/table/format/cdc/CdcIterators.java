@@ -80,6 +80,7 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -101,12 +102,26 @@ public final class CdcIterators {
   /**
    * Iterates over an ordered sequence of {@link HoodieCDCFileSplit}s, delegating
    * per-split record reading to a user-supplied factory function.
+   *
+   * <p>Thread-safety / teardown contract: this iterator is drained on the Flink task thread via
+   * {@link org.apache.hudi.source.reader.BatchRecords#nextRecordFromSplit()}, but Flink may
+   * {@link #close()} it from a different (split-fetcher) thread during job teardown - e.g. when a
+   * streaming read is force-terminated while a queued batch is still being drained. Reading is lazy
+   * (the live iterator is handed to {@code BatchRecords} without being drained), so the read and the
+   * close genuinely run on different threads. {@code hasNext()}, {@code next()} and {@code close()} are
+   * therefore {@code synchronized} on {@code this} so a concurrent {@code close()} cannot null out
+   * {@link #recordIterator}/{@link #imageManager} mid-read and surface a torn-read
+   * {@link NullPointerException} (the nested per-split iterators and {@code imageManager} are only ever
+   * touched through this instance, so this single lock covers them too). Once closed, the iterator
+   * reports end-of-stream: {@code hasNext()} returns {@code false} and {@code next()} throws
+   * {@link NoSuchElementException} rather than touching already-released state.
    */
   public static class CdcFileSplitsIterator implements ClosableIterator<RowData> {
     private CdcImageManager imageManager;
     private final Iterator<HoodieCDCFileSplit> fileSplitIterator;
     private final Function<HoodieCDCFileSplit, ClosableIterator<RowData>> recordIteratorFunc;
     private ClosableIterator<RowData> recordIterator;
+    private boolean closed;
 
     public CdcFileSplitsIterator(
         HoodieCDCFileSplit[] changes,
@@ -118,7 +133,10 @@ public final class CdcIterators {
     }
 
     @Override
-    public boolean hasNext() {
+    public synchronized boolean hasNext() {
+      if (closed) {
+        return false;
+      }
       if (recordIterator != null) {
         if (recordIterator.hasNext()) {
           return true;
@@ -135,14 +153,23 @@ public final class CdcIterators {
     }
 
     @Override
-    public RowData next() {
+    public synchronized RowData next() {
+      if (closed || recordIterator == null) {
+        throw new NoSuchElementException(
+            closed ? "CDC file-splits iterator was closed during teardown" : "No more CDC records");
+      }
       return recordIterator.next();
     }
 
     @Override
-    public void close() {
+    public synchronized void close() {
+      if (closed) {
+        return;
+      }
+      closed = true;
       if (recordIterator != null) {
         recordIterator.close();
+        recordIterator = null;
       }
       if (imageManager != null) {
         imageManager.close();
