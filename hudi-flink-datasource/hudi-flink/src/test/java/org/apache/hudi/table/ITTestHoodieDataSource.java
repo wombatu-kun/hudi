@@ -45,6 +45,7 @@ import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration;
 import org.apache.hudi.table.catalog.HoodieCatalogTestUtils;
 import org.apache.hudi.table.catalog.HoodieHiveCatalog;
+import org.apache.hudi.table.format.cdc.CdcIterators;
 import org.apache.hudi.util.StreamerUtil;
 import org.apache.hudi.utils.FlinkMiniCluster;
 import org.apache.hudi.utils.TestConfigurations;
@@ -4315,8 +4316,8 @@ public class ITTestHoodieDataSource {
   private static boolean containsCdcIteratorTeardownFrame(Throwable t) {
     for (StackTraceElement frame : t.getStackTrace()) {
       String className = frame.getClassName();
-      if (className.contains("CdcIterators$CdcFileSplitsIterator")
-          || className.contains("CdcIterators$BaseImageIterator")) {
+      if (className.contains(CdcIterators.CdcFileSplitsIterator.class.getName())
+          || className.contains(CdcIterators.BaseImageIterator.class.getName())) {
         return true;
       }
     }

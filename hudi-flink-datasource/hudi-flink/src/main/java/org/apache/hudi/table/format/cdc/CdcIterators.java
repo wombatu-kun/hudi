@@ -154,9 +154,11 @@ public final class CdcIterators {
 
     @Override
     public synchronized RowData next() {
-      if (closed || recordIterator == null) {
-        throw new NoSuchElementException(
-            closed ? "CDC file-splits iterator was closed during teardown" : "No more CDC records");
+      if (closed) {
+        throw new NoSuchElementException("CDC file-splits iterator was closed during teardown");
+      }
+      if (recordIterator == null) {
+        throw new NoSuchElementException("No more CDC records");
       }
       return recordIterator.next();
     }
