@@ -20,7 +20,10 @@ package org.apache.spark.sql.hudi
 
 import org.apache.avro.Schema
 import org.apache.hadoop.fs.{FileStatus, Path}
+import org.apache.hudi.PartitionFileSliceMapping
+import org.apache.hudi.client.model.HoodieInternalRow
 import org.apache.hudi.client.utils.SparkRowSerDe
+import org.apache.hudi.common.model.FileSlice
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.storage.StoragePath
 
@@ -45,6 +48,7 @@ import org.apache.spark.sql.sources.{BaseRelation, Filter}
 import org.apache.spark.sql.types.{DataType, Metadata, StructType}
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.unsafe.types.UTF8String
 
 import java.util.{Locale, TimeZone}
 
@@ -116,6 +120,37 @@ trait SparkAdapter extends Serializable {
    */
   def internalCreateDataFrame(spark: SparkSession, rdd: RDD[InternalRow], schema: StructType,
                               isStreaming: Boolean = false): DataFrame
+
+  /**
+   * Creates a Spark-version-specific concrete [[HoodieInternalRow]] overlaying the given meta-fields
+   * on top of [[sourceRow]]. [[HoodieInternalRow]] is abstract because Spark 4 added an abstract
+   * `getVariant` to [[org.apache.spark.sql.catalyst.expressions.SpecializedGetters]].
+   */
+  def createInternalRow(metaFields: Array[UTF8String],
+                        sourceRow: InternalRow,
+                        sourceContainsMetaFields: Boolean): HoodieInternalRow
+
+  /**
+   * Convenience overload building the meta-field array from the individual Hudi meta columns.
+   */
+  def createInternalRow(commitTime: UTF8String,
+                        commitSeqNumber: UTF8String,
+                        recordKey: UTF8String,
+                        partitionPath: UTF8String,
+                        fileName: UTF8String,
+                        sourceRow: InternalRow,
+                        sourceContainsMetaFields: Boolean): HoodieInternalRow =
+    createInternalRow(Array(commitTime, commitSeqNumber, recordKey, partitionPath, fileName),
+      sourceRow, sourceContainsMetaFields)
+
+  /**
+   * Creates a Spark-version-specific concrete [[PartitionFileSliceMapping]] overlaying the given
+   * file-slice [[slices]] on top of the partition-values [[internalRow]]. [[PartitionFileSliceMapping]]
+   * is abstract for the same reason [[HoodieInternalRow]] is: Spark 4 added an abstract `getVariant`
+   * to [[org.apache.spark.sql.catalyst.expressions.SpecializedGetters]].
+   */
+  def createPartitionFileSliceMapping(internalRow: InternalRow,
+                                      slices: Map[String, FileSlice]): PartitionFileSliceMapping
 
   /**
    * Creates instance of [[HoodieAvroSerializer]] providing for ability to serialize

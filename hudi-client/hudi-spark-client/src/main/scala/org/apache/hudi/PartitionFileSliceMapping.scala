@@ -25,8 +25,16 @@ import org.apache.spark.sql.catalyst.util.{ArrayData, MapData}
 import org.apache.spark.sql.types.{DataType, Decimal}
 import org.apache.spark.unsafe.types.{CalendarInterval, UTF8String}
 
-class PartitionFileSliceMapping(internalRow: InternalRow,
-                                slices: Map[String, FileSlice]) extends InternalRow {
+/**
+ * Overlays a map of file-slice mappings on top of a partition-values [[InternalRow]], delegating all
+ * row accessors to the wrapped [[internalRow]]. Abstract because Spark 4 added an abstract `getVariant`
+ * to [[org.apache.spark.sql.catalyst.expressions.SpecializedGetters]] whose return type
+ * ([[org.apache.spark.unsafe.types.VariantVal]]) does not exist in Spark 3.5, so it is implemented in a
+ * Spark-version-specific subclass. Instances are created through
+ * [[org.apache.spark.sql.hudi.SparkAdapter#createPartitionFileSliceMapping]].
+ */
+abstract class PartitionFileSliceMapping(internalRow: InternalRow,
+                                         slices: Map[String, FileSlice]) extends InternalRow {
 
   def getSlice(fileId: String): Option[FileSlice] = {
     slices.get(fileId)
@@ -40,7 +48,8 @@ class PartitionFileSliceMapping(internalRow: InternalRow,
 
   override def update(i: Int, value: Any): Unit = internalRow.update(i, value)
 
-  override def copy(): InternalRow = new PartitionFileSliceMapping(internalRow.copy(), slices)
+  override def copy(): InternalRow =
+    SparkAdapterSupport.sparkAdapter.createPartitionFileSliceMapping(internalRow.copy(), slices)
 
   override def isNullAt(ordinal: Int): Boolean = internalRow.isNullAt(ordinal)
 

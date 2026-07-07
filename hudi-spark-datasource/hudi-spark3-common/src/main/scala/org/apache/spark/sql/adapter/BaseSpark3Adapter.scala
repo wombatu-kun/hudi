@@ -17,12 +17,14 @@
 
 package org.apache.spark.sql.adapter
 
+import org.apache.hudi.client.model.{HoodieInternalRow, Spark3HoodieInternalRow}
 import org.apache.hudi.client.utils.SparkRowSerDe
+import org.apache.hudi.common.model.FileSlice
 import org.apache.hudi.common.table.HoodieTableMetaClient
 import org.apache.hudi.common.util.JsonUtils
 import org.apache.hudi.spark3.internal.ReflectUtil
 import org.apache.hudi.storage.StoragePath
-import org.apache.hudi.{AvroConversionUtils, DefaultSource, HoodieSparkUtils, Spark3RowSerDe}
+import org.apache.hudi.{AvroConversionUtils, DefaultSource, HoodieSparkUtils, PartitionFileSliceMapping, Spark3PartitionFileSliceMapping, Spark3RowSerDe}
 
 import org.apache.avro.Schema
 import org.apache.spark.internal.Logging
@@ -38,6 +40,7 @@ import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 import org.apache.spark.sql.{DataFrame, DataFrameUtil, HoodieSpark3CatalogUtils, HoodieUnsafeUtils, HoodieUTF8StringFactory, SQLContext, Spark3DataFrameUtil, Spark3HoodieUnsafeUtils, Spark3HoodieUTF8StringFactory, SparkSession}
 import org.apache.spark.storage.StorageLevel
+import org.apache.spark.unsafe.types.UTF8String
 
 import java.time.ZoneId
 import java.util.TimeZone
@@ -114,4 +117,13 @@ abstract class BaseSpark3Adapter extends SparkAdapter with Logging {
                                        schema: StructType,
                                        isStreaming: Boolean = false): DataFrame =
     spark.internalCreateDataFrame(rdd, schema, isStreaming)
+
+  override def createInternalRow(metaFields: Array[UTF8String],
+                                 sourceRow: InternalRow,
+                                 sourceContainsMetaFields: Boolean): HoodieInternalRow =
+    new Spark3HoodieInternalRow(metaFields, sourceRow, sourceContainsMetaFields)
+
+  override def createPartitionFileSliceMapping(internalRow: InternalRow,
+                                               slices: Map[String, FileSlice]): PartitionFileSliceMapping =
+    new Spark3PartitionFileSliceMapping(internalRow, slices)
 }
