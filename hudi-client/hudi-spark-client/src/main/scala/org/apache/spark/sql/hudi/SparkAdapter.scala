@@ -92,6 +92,12 @@ trait SparkAdapter extends Serializable {
   def getSchemaUtils: HoodieSchemaUtils
 
   /**
+   * Returns an instance of [[HoodieUTF8StringFactory]] for wrapping [[org.apache.spark.unsafe.types.UTF8String]]s
+   * into comparable values in a Spark-version-neutral way (Spark 4 disables UTF8String.compareTo).
+   */
+  def getUTF8StringFactory: HoodieUTF8StringFactory
+
+  /**
    * Creates instance of [[HoodieAvroSerializer]] providing for ability to serialize
    * Spark's [[InternalRow]] into Avro payloads
    */

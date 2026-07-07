@@ -34,7 +34,7 @@ import org.apache.spark.sql.hudi.SparkAdapter
 import org.apache.spark.sql.sources.{BaseRelation, Filter}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
-import org.apache.spark.sql.{HoodieSpark3CatalogUtils, SQLContext, SparkSession}
+import org.apache.spark.sql.{HoodieSpark3CatalogUtils, HoodieUTF8StringFactory, SQLContext, Spark3HoodieUTF8StringFactory, SparkSession}
 import org.apache.spark.storage.StorageLevel
 
 import java.time.ZoneId
@@ -100,4 +100,6 @@ abstract class BaseSpark3Adapter extends SparkAdapter with Logging {
   override def makeColumnarBatch(vectors: Array[ColumnVector], numRows: Int): ColumnarBatch = {
     new ColumnarBatch(vectors, numRows)
   }
+
+  override def getUTF8StringFactory: HoodieUTF8StringFactory = Spark3HoodieUTF8StringFactory
 }

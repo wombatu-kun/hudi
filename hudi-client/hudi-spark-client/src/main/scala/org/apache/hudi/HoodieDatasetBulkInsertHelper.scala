@@ -52,7 +52,10 @@ import scala.collection.JavaConverters.asScalaBufferConverter
 import scala.collection.mutable
 
 object HoodieDatasetBulkInsertHelper
-  extends ParallelismHelper[DataFrame](toJavaSerializableFunctionUnchecked(df => getNumPartitions(df))) with Logging {
+  extends ParallelismHelper[DataFrame](toJavaSerializableFunctionUnchecked(df => getNumPartitions(df)))
+    with SparkAdapterSupport with Logging {
+
+  private val hoodieUTF8StringFactory = sparkAdapter.getUTF8StringFactory
 
   /**
    * Prepares [[DataFrame]] for bulk-insert into Hudi table, taking following steps:
@@ -219,8 +222,16 @@ object HoodieDatasetBulkInsertHelper
         (rowKey, row.copy())
       }
       .reduceByKey ((oneRow, otherRow) => {
-        val onePreCombineVal = getNestedInternalRowValue(oneRow, preCombineFieldPath).asInstanceOf[Comparable[AnyRef]]
-        val otherPreCombineVal = getNestedInternalRowValue(otherRow, preCombineFieldPath).asInstanceOf[Comparable[AnyRef]]
+        // Spark 4 disables UTF8String.compareTo; wrap string ordering values via HoodieUTF8StringFactory
+        // (Spark 4 impl uses binaryCompare, Spark 3.5 impl uses compareTo) as in [HUDI-7915].
+        val onePreCombineVal = (getNestedInternalRowValue(oneRow, preCombineFieldPath) match {
+          case utf8: UTF8String => hoodieUTF8StringFactory.wrapUTF8String(utf8)
+          case other => other
+        }).asInstanceOf[Comparable[AnyRef]]
+        val otherPreCombineVal = getNestedInternalRowValue(otherRow, preCombineFieldPath) match {
+          case utf8: UTF8String => hoodieUTF8StringFactory.wrapUTF8String(utf8)
+          case other => other
+        }
         if (onePreCombineVal.compareTo(otherPreCombineVal.asInstanceOf[AnyRef]) >= 0) {
           oneRow
         } else {

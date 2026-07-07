@@ -19,6 +19,7 @@
 package org.apache.hudi.io.storage.row;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hudi.SparkAdapterSupport$;
 import org.apache.hudi.avro.HoodieBloomFilterWriteSupport;
 import org.apache.hudi.common.bloom.BloomFilter;
 import org.apache.hudi.common.config.HoodieConfig;
@@ -27,6 +28,7 @@ import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.ReflectionUtils;
 
 import org.apache.parquet.hadoop.api.WriteSupport;
+import org.apache.spark.sql.HoodieUTF8StringFactory;
 import org.apache.spark.sql.execution.datasources.parquet.ParquetWriteSupport;
 import org.apache.spark.sql.types.StructType;
 import org.apache.spark.unsafe.types.UTF8String;
@@ -74,6 +76,9 @@ public class HoodieRowParquetWriteSupport extends ParquetWriteSupport {
   }
 
   private static class HoodieBloomFilterRowWriteSupport extends HoodieBloomFilterWriteSupport<UTF8String> {
+    private static final HoodieUTF8StringFactory UTF8STRING_FACTORY =
+        SparkAdapterSupport$.MODULE$.sparkAdapter().getUTF8StringFactory();
+
     public HoodieBloomFilterRowWriteSupport(BloomFilter bloomFilter) {
       super(bloomFilter);
     }
@@ -81,6 +86,11 @@ public class HoodieRowParquetWriteSupport extends ParquetWriteSupport {
     @Override
     protected byte[] getUTF8Bytes(UTF8String key) {
       return key.getBytes();
+    }
+
+    @Override
+    protected int compareRecordKey(UTF8String a, UTF8String b) {
+      return UTF8STRING_FACTORY.wrapUTF8String(a).compareTo(UTF8STRING_FACTORY.wrapUTF8String(b));
     }
 
     @Override

@@ -55,13 +55,22 @@ public abstract class HoodieBloomFilterWriteSupport<T extends Comparable<T>> {
   public void addKey(T recordKey) {
     bloomFilter.add(getUTF8Bytes(recordKey));
 
-    if (minRecordKey == null || minRecordKey.compareTo(recordKey) > 0) {
+    if (minRecordKey == null || compareRecordKey(minRecordKey, recordKey) > 0) {
       minRecordKey = dereference(recordKey);
     }
 
-    if (maxRecordKey == null || maxRecordKey.compareTo(recordKey) < 0) {
+    if (maxRecordKey == null || compareRecordKey(maxRecordKey, recordKey) < 0) {
       maxRecordKey = dereference(recordKey);
     }
+  }
+
+  /**
+   * Compares two record keys to track the min/max within a file. Defaults to the natural
+   * ordering; subclasses may override where the key type's {@link Comparable#compareTo} is
+   * unavailable (e.g. Spark 4 disables {@code UTF8String.compareTo}).
+   */
+  protected int compareRecordKey(T a, T b) {
+    return a.compareTo(b);
   }
 
   public Map<String, String> finalizeMetadata() {
