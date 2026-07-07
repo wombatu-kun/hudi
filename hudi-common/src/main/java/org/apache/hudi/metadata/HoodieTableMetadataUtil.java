@@ -105,7 +105,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiFunction;
 import java.util.function.Function;
-import java.util.stream.Collector;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -244,13 +243,10 @@ public class HoodieTableMetadataUtil {
       });
     });
 
-    Collector<HoodieColumnRangeMetadata<Comparable>, ?, Map<String, HoodieColumnRangeMetadata<Comparable>>> collector =
-        Collectors.toMap(HoodieColumnRangeMetadata::getColumnName, Function.identity());
-
-    return (Map<String, HoodieColumnRangeMetadata<Comparable>>) targetFields.stream()
+    return targetFields.stream()
         .map(field -> {
           ColumnStats colStats = allColumnStats.get(field.name());
-          return HoodieColumnRangeMetadata.<Comparable>create(
+          HoodieColumnRangeMetadata<Comparable> rangeMetadata = HoodieColumnRangeMetadata.<Comparable>create(
               filePath,
               field.name(),
               colStats == null ? null : coerceToComparable(field.schema(), colStats.minValue),
@@ -263,8 +259,9 @@ public class HoodieTableMetadataUtil {
               0,
               0
           );
+          return rangeMetadata;
         })
-        .collect(collector);
+        .collect(Collectors.toMap(HoodieColumnRangeMetadata::getColumnName, Function.identity()));
   }
 
   /**

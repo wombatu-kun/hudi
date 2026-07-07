@@ -207,7 +207,7 @@ public class AvroSchemaUtils {
    */
   public static Schema appendFieldsToSchema(Schema schema, List<Schema.Field> newFields) {
     List<Schema.Field> fields = schema.getFields().stream()
-        .map(field -> new Schema.Field(field.name(), field.schema(), field.doc(), field.defaultVal()))
+        .map(HoodieAvroUtils::createNewSchemaField)
         .collect(Collectors.toList());
     fields.addAll(newFields);
 
