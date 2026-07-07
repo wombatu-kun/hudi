@@ -36,13 +36,15 @@ import org.apache.spark.sql.catalyst.analysis.EliminateSubqueryAliases
 import org.apache.spark.sql.catalyst.catalog.CatalogTable
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.catalyst.expressions.{Attribute, AttributeReference, Expression, InterpretedPredicate}
-import org.apache.spark.sql.catalyst.parser.ParserInterface
+import org.apache.spark.sql.catalyst.parser.{ParseException, ParserInterface}
+import org.apache.spark.sql.catalyst.trees.Origin
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical.{Command, LogicalPlan}
 import org.apache.spark.sql.catalyst.util.DateFormatter
 import org.apache.spark.sql.catalyst.{InternalRow, TableIdentifier}
 import org.apache.spark.sql.execution.datasources._
 import org.apache.spark.sql.execution.datasources.parquet.ParquetFileFormat
+import org.apache.spark.sql.jdbc.JdbcDialect
 import org.apache.spark.sql.parser.HoodieExtendedParserInterface
 import org.apache.spark.sql.sources.{BaseRelation, Filter}
 import org.apache.spark.sql.types.{DataType, Metadata, StructType}
@@ -50,6 +52,7 @@ import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.UTF8String
 
+import java.sql.{Connection, ResultSet}
 import java.util.{Locale, TimeZone}
 
 /**
@@ -97,12 +100,6 @@ trait SparkAdapter extends Serializable {
   def getSchemaUtils: HoodieSchemaUtils
 
   /**
-   * Returns an instance of [[HoodieUTF8StringFactory]] for wrapping [[org.apache.spark.unsafe.types.UTF8String]]s
-   * into comparable values in a Spark-version-neutral way (Spark 4 disables UTF8String.compareTo).
-   */
-  def getUTF8StringFactory: HoodieUTF8StringFactory
-
-  /**
    * Returns an instance of [[DataFrameUtil]] for creating [[DataFrame]]s from low-level Spark
    * constructs in a Spark-version-neutral way.
    */
@@ -113,6 +110,12 @@ trait SparkAdapter extends Serializable {
    * in a Spark-version-neutral way.
    */
   def getUnsafeUtils: HoodieUnsafeUtils
+
+  /**
+   * Returns an instance of [[HoodieUTF8StringFactory]] for wrapping [[org.apache.spark.unsafe.types.UTF8String]]s
+   * into comparable values in a Spark-version-neutral way (Spark 4 disables UTF8String.compareTo).
+   */
+  def getUTF8StringFactory: HoodieUTF8StringFactory
 
   /**
    * Creates a [[DataFrame]] from the given [[RDD]] of [[InternalRow]]s and [[schema]], delegating to
@@ -151,6 +154,27 @@ trait SparkAdapter extends Serializable {
    */
   def createPartitionFileSliceMapping(internalRow: InternalRow,
                                       slices: Map[String, FileSlice]): PartitionFileSliceMapping
+
+  /**
+   * Returns the Catalyst schema for a JDBC [[ResultSet]] in a Spark-version-neutral way. Spark 4.0
+   * added a leading [[Connection]] parameter to the underlying JdbcUtils.getSchema; the Spark 3 impl
+   * ignores the connection while the Spark 4 impl forwards it.
+   */
+  def getJdbcSchema(connection: Connection, resultSet: ResultSet, dialect: JdbcDialect,
+                    alwaysNullable: Boolean): StructType
+
+  /**
+   * Creates a [[Column]] wrapping the given Catalyst [[Expression]] in a Spark-version-neutral way.
+   * Spark 4 backs [[Column]] with an [[org.apache.spark.sql.internal.ColumnNode]] rather than an
+   * [[Expression]], so `new Column(expr)` no longer compiles across versions.
+   */
+  def createColumnFromExpression(expression: Expression): Column
+
+  /**
+   * Extracts the Catalyst [[Expression]] underlying the given [[Column]] in a Spark-version-neutral way.
+   * Spark 4 removed the public `Column#expr` accessor.
+   */
+  def getExpressionFromColumn(column: Column): Expression
 
   /**
    * Creates instance of [[HoodieAvroSerializer]] providing for ability to serialize
@@ -210,7 +234,9 @@ trait SparkAdapter extends Serializable {
       case plan if !plan.resolved => None
       // NOTE: When resolving Hudi table we allow [[Filter]]s and [[Project]]s be applied
       //       on top of it
-      case PhysicalOperation(_, _, LogicalRelation(_, _, Some(table), _)) if isHoodieTable(table) => Some(table)
+      // NOTE: matched positionally-agnostically ([[LogicalRelation]] gained a `stream` field in
+      //       Spark 4), extracting the catalog table through the stable `catalogTable` accessor
+      case PhysicalOperation(_, _, lr: LogicalRelation) if lr.catalogTable.exists(isHoodieTable) => lr.catalogTable
       case _ => None
     }
   }
@@ -280,4 +306,13 @@ trait SparkAdapter extends Serializable {
    * Tries to translate a Catalyst Expression into data source Filter
    */
   def translateFilter(predicate: Expression, supportNestedPredicatePushdown: Boolean = false): Option[Filter]
+
+  /**
+   * Creates a [[ParseException]] carrying proper location information. Abstracts over the constructor
+   * differences between Spark 3.x (message-based) and Spark 4.x (error-class-based).
+   */
+  def newParseException(command: Option[String],
+                        exception: AnalysisException,
+                        start: Origin,
+                        stop: Origin): ParseException
 }

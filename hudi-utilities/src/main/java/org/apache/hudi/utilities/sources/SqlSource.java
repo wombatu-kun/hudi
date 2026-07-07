@@ -78,7 +78,6 @@ public class SqlSource extends RowSource {
       Option<String> lastCkptStr, long sourceLimit) {
     LOG.debug(sourceSql);
     Dataset<Row> source = spark.sql(sourceSql);
-    LOG.debug(source.showString(10, 0, true));
     // Remove Hoodie meta columns except partition path from input source.
     if (Arrays.asList(source.columns()).contains(HoodieRecord.COMMIT_TIME_METADATA_FIELD)) {
       source =

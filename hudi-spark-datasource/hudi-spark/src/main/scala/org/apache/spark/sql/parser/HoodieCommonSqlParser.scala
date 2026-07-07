@@ -72,6 +72,13 @@ class HoodieCommonSqlParser(session: SparkSession, delegate: ParserInterface)
    */
   def parseMultipartIdentifier(sqlText: String): Seq[String] = sparkExtendedParser.parseMultipartIdentifier(sqlText)
 
+  /**
+   * SPARK-44066 Added [[parseRoutineParam]] to [[ParserInterface]] in Spark 4.0.0.
+   * Don't mark this as override for backward compatibility with Spark 3.x.
+   */
+  def parseRoutineParam(sqlText: String): StructType =
+    throw new UnsupportedOperationException(s"Unsupported parseRoutineParam method")
+
   protected def parse[T](command: String)(toResult: HoodieSqlCommonParser => T): T = {
     logDebug(s"Parsing command: $command")
 
@@ -108,7 +115,7 @@ class HoodieCommonSqlParser(session: SparkSession, delegate: ParserInterface)
         throw e.withCommand(command)
       case e: AnalysisException =>
         val position = Origin(e.line, e.startPosition)
-        throw new ParseException(Option(command), e.message, position, position)
+        throw sparkAdapter.newParseException(Option(command), e, position, position)
     }
   }
 }

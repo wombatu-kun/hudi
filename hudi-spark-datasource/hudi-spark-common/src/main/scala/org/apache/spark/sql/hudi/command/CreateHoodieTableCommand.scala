@@ -35,7 +35,8 @@ import org.apache.spark.sql.hudi.HoodieSqlCommonUtils.isUsingHiveCatalog
 import org.apache.spark.sql.hudi.{HoodieOptionConfig, HoodieSqlCommonUtils}
 import org.apache.spark.sql.internal.StaticSQLConf.SCHEMA_STRING_LENGTH_THRESHOLD
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{AnalysisException, Row, SparkSession}
+import org.apache.spark.sql.{Row, SparkSession}
+import org.apache.spark.sql.hudi.command.exception.HoodieAnalysisException
 import org.apache.spark.{SPARK_VERSION, SparkConf}
 
 import java.io.{PrintWriter, StringWriter}
@@ -71,10 +72,10 @@ case class CreateHoodieTableCommand(table: CatalogTable, ignoreIfExists: Boolean
       hoodieCatalogTable.initHoodieTable()
     } else {
       if (!hoodieCatalogTable.hoodieTableExists) {
-        throw new AnalysisException("Creating ro/rt table need the existence of the base table.")
+        throw new HoodieAnalysisException("Creating ro/rt table need the existence of the base table.")
       }
       if (HoodieTableType.MERGE_ON_READ != hoodieCatalogTable.tableType) {
-        throw new AnalysisException("Creating ro/rt table should only apply to a mor table.")
+        throw new HoodieAnalysisException("Creating ro/rt table should only apply to a mor table.")
       }
     }
 

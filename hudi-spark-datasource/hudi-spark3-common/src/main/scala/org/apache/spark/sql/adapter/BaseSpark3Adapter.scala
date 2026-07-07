@@ -32,16 +32,21 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.avro.{HoodieAvroSchemaConverters, HoodieSparkAvroSchemaConverters}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Expression, InterpretedPredicate, Predicate}
+import org.apache.spark.sql.catalyst.parser.ParseException
+import org.apache.spark.sql.catalyst.trees.Origin
 import org.apache.spark.sql.catalyst.util.DateFormatter
 import org.apache.spark.sql.execution.datasources._
+import org.apache.spark.sql.execution.datasources.jdbc.JdbcUtils
 import org.apache.spark.sql.hudi.SparkAdapter
+import org.apache.spark.sql.jdbc.JdbcDialect
 import org.apache.spark.sql.sources.{BaseRelation, Filter}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
-import org.apache.spark.sql.{DataFrame, DataFrameUtil, HoodieSpark3CatalogUtils, HoodieUnsafeUtils, HoodieUTF8StringFactory, SQLContext, Spark3DataFrameUtil, Spark3HoodieUnsafeUtils, Spark3HoodieUTF8StringFactory, SparkSession}
+import org.apache.spark.sql.{AnalysisException, Column, DataFrame, DataFrameUtil, HoodieSpark3CatalogUtils, HoodieUnsafeUtils, HoodieUTF8StringFactory, SQLContext, Spark3DataFrameUtil, Spark3HoodieUnsafeUtils, Spark3HoodieUTF8StringFactory, SparkSession}
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.unsafe.types.UTF8String
 
+import java.sql.{Connection, ResultSet}
 import java.time.ZoneId
 import java.util.TimeZone
 import java.util.concurrent.ConcurrentHashMap
@@ -106,11 +111,11 @@ abstract class BaseSpark3Adapter extends SparkAdapter with Logging {
     new ColumnarBatch(vectors, numRows)
   }
 
-  override def getUTF8StringFactory: HoodieUTF8StringFactory = Spark3HoodieUTF8StringFactory
-
   override def getDataFrameUtil: DataFrameUtil = Spark3DataFrameUtil
 
   override def getUnsafeUtils: HoodieUnsafeUtils = Spark3HoodieUnsafeUtils
+
+  override def getUTF8StringFactory: HoodieUTF8StringFactory = Spark3HoodieUTF8StringFactory
 
   override def internalCreateDataFrame(spark: SparkSession,
                                        rdd: RDD[InternalRow],
@@ -126,4 +131,19 @@ abstract class BaseSpark3Adapter extends SparkAdapter with Logging {
   override def createPartitionFileSliceMapping(internalRow: InternalRow,
                                                slices: Map[String, FileSlice]): PartitionFileSliceMapping =
     new Spark3PartitionFileSliceMapping(internalRow, slices)
+
+  override def getJdbcSchema(connection: Connection, resultSet: ResultSet, dialect: JdbcDialect,
+                             alwaysNullable: Boolean): StructType =
+    JdbcUtils.getSchema(resultSet, dialect, alwaysNullable, false)
+
+  override def createColumnFromExpression(expression: Expression): Column = new Column(expression)
+
+  override def getExpressionFromColumn(column: Column): Expression = column.expr
+
+  override def newParseException(command: Option[String],
+                                 exception: AnalysisException,
+                                 start: Origin,
+                                 stop: Origin): ParseException = {
+    new ParseException(command, exception.getMessage, start, stop)
+  }
 }
