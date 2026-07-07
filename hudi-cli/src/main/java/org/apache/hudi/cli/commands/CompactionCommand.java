@@ -70,6 +70,7 @@ import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
 import static org.apache.hudi.cli.utils.CommitUtil.getTimeDaysAgo;
+import static org.apache.hudi.util.JavaScalaConverters.convertJavaPropertiesToScalaMap;
 
 /**
  * CLI command to display compaction related options.
@@ -200,7 +201,7 @@ public class CompactionCommand {
     String compactionInstantTime = HoodieActiveTimeline.createNewInstantTime();
 
     String sparkPropertiesPath =
-        Utils.getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+        Utils.getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
     SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
     String cmd = SparkCommand.COMPACT_SCHEDULE.toString();
     sparkLauncher.addAppArgs(cmd, master, sparkMemory, client.getBasePath(),
@@ -249,7 +250,7 @@ public class CompactionCommand {
       compactionInstantTime = firstPendingInstant.get();
     }
     String sparkPropertiesPath =
-        Utils.getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+        Utils.getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
     SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
     sparkLauncher.addAppArgs(SparkCommand.COMPACT_RUN.toString(), master, sparkMemory, client.getBasePath(),
         client.getTableConfig().getTableName(), compactionInstantTime, parallelism, schemaFilePath,
@@ -284,7 +285,7 @@ public class CompactionCommand {
     boolean initialized = HoodieCLI.initConf();
     HoodieCLI.initFS(initialized);
     String sparkPropertiesPath =
-        Utils.getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+        Utils.getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
     SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
     sparkLauncher.addAppArgs(SparkCommand.COMPACT_SCHEDULE_AND_EXECUTE.toString(), master, sparkMemory, client.getBasePath(),
         client.getTableConfig().getTableName(), parallelism, schemaFilePath,
@@ -470,7 +471,7 @@ public class CompactionCommand {
     String output;
     try {
       String sparkPropertiesPath = Utils
-          .getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+          .getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
       SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
       sparkLauncher.addAppArgs(SparkCommand.COMPACT_VALIDATE.toString(), master, sparkMemory, client.getBasePath(),
           compactionInstant, outputPathStr, parallelism);
@@ -535,7 +536,7 @@ public class CompactionCommand {
     String output;
     try {
       String sparkPropertiesPath = Utils
-          .getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+          .getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
       SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
       sparkLauncher.addAppArgs(SparkCommand.COMPACT_UNSCHEDULE_PLAN.toString(), master, sparkMemory, client.getBasePath(),
           compactionInstant, outputPathStr, parallelism, Boolean.valueOf(skipV).toString(),
@@ -580,7 +581,7 @@ public class CompactionCommand {
     String output;
     try {
       String sparkPropertiesPath = Utils
-          .getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+          .getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
       SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
       sparkLauncher.addAppArgs(SparkCommand.COMPACT_UNSCHEDULE_FILE.toString(), master, sparkMemory, client.getBasePath(),
           fileId, partitionPath, outputPathStr, "1", Boolean.valueOf(skipV).toString(),
@@ -626,7 +627,7 @@ public class CompactionCommand {
     String output;
     try {
       String sparkPropertiesPath = Utils
-          .getDefaultPropertiesFile(scala.collection.JavaConversions.propertiesAsScalaMap(System.getProperties()));
+          .getDefaultPropertiesFile(convertJavaPropertiesToScalaMap(System.getProperties()));
       SparkLauncher sparkLauncher = SparkUtil.initLauncher(sparkPropertiesPath);
       sparkLauncher.addAppArgs(SparkCommand.COMPACT_REPAIR.toString(), master, sparkMemory, client.getBasePath(),
           compactionInstant, outputPathStr, parallelism, Boolean.valueOf(dryRun).toString());
