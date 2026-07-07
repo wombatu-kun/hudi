@@ -16,21 +16,27 @@
  * limitations under the License.
  */
 
-package org.apache.hudi
+package org.apache.spark.sql
 
-import org.apache.hudi.common.model.HoodieRecord
+import org.apache.hudi.SparkAdapterSupport
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
+import org.apache.spark.sql.execution.LogicalRDD
 import org.apache.spark.sql.types.StructType
-import org.apache.spark.sql.{Dataset, Row, SparkSession}
 
-object SparkConversionUtils extends SparkAdapterSupport {
+/**
+ * Spark 3.x implementation of [[DataFrameUtil]].
+ */
+object Spark3DataFrameUtil extends DataFrameUtil {
 
-  def createDataFrame[T](rdd: RDD[HoodieRecord[T]], ss: SparkSession, structType: StructType): Dataset[Row] = {
-    if (rdd.isEmpty()) {
-      ss.emptyDataFrame
-    } else {
-      sparkAdapter.getDataFrameUtil.createFromInternalRows(ss, structType, rdd.map(_.getData.asInstanceOf[InternalRow]))
-    }
+  override def createFromInternalRows(sparkSession: SparkSession, schema: StructType,
+                                      rdd: RDD[InternalRow]): DataFrame = {
+    val logicalPlan = LogicalRDD(
+      SparkAdapterSupport.sparkAdapter.getSchemaUtils.toAttributes(schema), rdd)(sparkSession)
+    Dataset.ofRows(sparkSession, logicalPlan)
   }
+
+  override def ofRows(sparkSession: SparkSession, logicalPlan: LogicalPlan): DataFrame =
+    Dataset.ofRows(sparkSession, logicalPlan)
 }

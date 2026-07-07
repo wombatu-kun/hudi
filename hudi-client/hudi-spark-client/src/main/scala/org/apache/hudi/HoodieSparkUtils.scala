@@ -37,7 +37,7 @@ import org.apache.spark.sql.execution.SQLConfInjectingRDD
 import org.apache.spark.sql.execution.datasources.SparkParsePartitionUtil
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{StringType, StructField, StructType}
-import org.apache.spark.sql.{DataFrame, HoodieUnsafeUtils}
+import org.apache.spark.sql.DataFrame
 import org.apache.spark.unsafe.types.UTF8String
 
 import scala.collection.JavaConverters._
@@ -54,6 +54,8 @@ private[hudi] trait SparkVersionsSupport {
   def isSpark3_3: Boolean = getSparkVersion.startsWith("3.3")
   def isSpark3_4: Boolean = getSparkVersion.startsWith("3.4")
   def isSpark3_5: Boolean = getSparkVersion.startsWith("3.5")
+  def isSpark4: Boolean = getSparkVersion.startsWith("4.")
+  def isSpark4_0: Boolean = getSparkVersion.startsWith("4.0")
 
   def gteqSpark3_0: Boolean = getSparkVersion >= "3.0"
   def gteqSpark3_1: Boolean = getSparkVersion >= "3.1"
@@ -65,6 +67,7 @@ private[hudi] trait SparkVersionsSupport {
   def gteqSpark3_3_2: Boolean = getSparkVersion >= "3.3.2"
   def gteqSpark3_4: Boolean = getSparkVersion >= "3.4"
   def gteqSpark3_5: Boolean = getSparkVersion >= "3.5"
+  def gteqSpark4_0: Boolean = getSparkVersion >= "4.0"
 }
 
 object HoodieSparkUtils extends SparkAdapterSupport with SparkVersionsSupport with Logging {
@@ -134,7 +137,7 @@ object HoodieSparkUtils extends SparkAdapterSupport with SparkVersionsSupport wi
 
   def maybeWrapDataFrameWithException(df: DataFrame, exceptionClass: String, msg: String, shouldWrap: Boolean): DataFrame = {
     if (shouldWrap) {
-      HoodieUnsafeUtils.createDataFrameFromRDD(df.sparkSession, injectSQLConf(df.queryExecution.toRdd.mapPartitions {
+      sparkAdapter.getUnsafeUtils.createDataFrameFromRDD(df.sparkSession, injectSQLConf(df.queryExecution.toRdd.mapPartitions {
         rows => new ExceptionWrappingIterator[InternalRow](rows, exceptionClass, msg)
       }, SQLConf.get), df.schema)
     } else {

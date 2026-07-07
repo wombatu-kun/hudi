@@ -383,7 +383,7 @@ case class MergeIntoHoodieTableCommand(mergeInto: MergeIntoTable) extends Hoodie
 
     val amendedPlan = Project(adjustedSourceTableOutput ++ additionalColumns, projectedJoinPlan)
 
-    Dataset.ofRows(sparkSession, amendedPlan)
+    sparkAdapter.getDataFrameUtil.ofRows(sparkSession, amendedPlan)
   }
 
   /**

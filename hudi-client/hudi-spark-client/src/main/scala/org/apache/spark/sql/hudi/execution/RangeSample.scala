@@ -18,6 +18,7 @@
 
 package org.apache.spark.sql.hudi.execution
 
+import org.apache.hudi.SparkAdapterSupport.sparkAdapter
 import org.apache.hudi.common.util.BinaryUtil
 import org.apache.hudi.config.HoodieClusteringConfig
 import org.apache.hudi.config.HoodieClusteringConfig.LayoutOptimizationStrategy
@@ -536,7 +537,7 @@ object RangeSampleSort {
           mutablePair.update(unsafeRow, zValues)
         }
       }.sortBy(x => ByteArraySorting(x._2), numPartitions = fileNum).map(_._1)
-      spark.internalCreateDataFrame(indexRdd, schema)
+      sparkAdapter.internalCreateDataFrame(spark, indexRdd, schema)
     }
   }
 }

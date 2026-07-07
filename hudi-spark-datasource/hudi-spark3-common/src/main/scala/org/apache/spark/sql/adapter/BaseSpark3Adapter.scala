@@ -26,7 +26,9 @@ import org.apache.hudi.{AvroConversionUtils, DefaultSource, HoodieSparkUtils, Sp
 
 import org.apache.avro.Schema
 import org.apache.spark.internal.Logging
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.avro.{HoodieAvroSchemaConverters, HoodieSparkAvroSchemaConverters}
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Expression, InterpretedPredicate, Predicate}
 import org.apache.spark.sql.catalyst.util.DateFormatter
 import org.apache.spark.sql.execution.datasources._
@@ -34,7 +36,7 @@ import org.apache.spark.sql.hudi.SparkAdapter
 import org.apache.spark.sql.sources.{BaseRelation, Filter}
 import org.apache.spark.sql.types.StructType
 import org.apache.spark.sql.vectorized.{ColumnVector, ColumnarBatch}
-import org.apache.spark.sql.{HoodieSpark3CatalogUtils, HoodieUTF8StringFactory, SQLContext, Spark3HoodieUTF8StringFactory, SparkSession}
+import org.apache.spark.sql.{DataFrame, DataFrameUtil, HoodieSpark3CatalogUtils, HoodieUnsafeUtils, HoodieUTF8StringFactory, SQLContext, Spark3DataFrameUtil, Spark3HoodieUnsafeUtils, Spark3HoodieUTF8StringFactory, SparkSession}
 import org.apache.spark.storage.StorageLevel
 
 import java.time.ZoneId
@@ -102,4 +104,14 @@ abstract class BaseSpark3Adapter extends SparkAdapter with Logging {
   }
 
   override def getUTF8StringFactory: HoodieUTF8StringFactory = Spark3HoodieUTF8StringFactory
+
+  override def getDataFrameUtil: DataFrameUtil = Spark3DataFrameUtil
+
+  override def getUnsafeUtils: HoodieUnsafeUtils = Spark3HoodieUnsafeUtils
+
+  override def internalCreateDataFrame(spark: SparkSession,
+                                       rdd: RDD[InternalRow],
+                                       schema: StructType,
+                                       isStreaming: Boolean = false): DataFrame =
+    spark.internalCreateDataFrame(rdd, schema, isStreaming)
 }

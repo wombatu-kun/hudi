@@ -26,6 +26,7 @@ import org.apache.hudi.storage.StoragePath
 
 import org.apache.avro.Schema
 import org.apache.hadoop.conf.Configuration
+import org.apache.spark.rdd.RDD
 import org.apache.spark.sql._
 import org.apache.spark.sql.avro.{HoodieAvroDeserializer, HoodieAvroSchemaConverters, HoodieAvroSerializer}
 import org.apache.spark.sql.catalyst.analysis.EliminateSubqueryAliases
@@ -96,6 +97,25 @@ trait SparkAdapter extends Serializable {
    * into comparable values in a Spark-version-neutral way (Spark 4 disables UTF8String.compareTo).
    */
   def getUTF8StringFactory: HoodieUTF8StringFactory
+
+  /**
+   * Returns an instance of [[DataFrameUtil]] for creating [[DataFrame]]s from low-level Spark
+   * constructs in a Spark-version-neutral way.
+   */
+  def getDataFrameUtil: DataFrameUtil
+
+  /**
+   * Returns an instance of [[HoodieUnsafeUtils]] for handling [[org.apache.hudi.HoodieUnsafeRDD]]s
+   * in a Spark-version-neutral way.
+   */
+  def getUnsafeUtils: HoodieUnsafeUtils
+
+  /**
+   * Creates a [[DataFrame]] from the given [[RDD]] of [[InternalRow]]s and [[schema]], delegating to
+   * Spark's (package-private) [[SparkSession#internalCreateDataFrame]], which moved packages in Spark 4.
+   */
+  def internalCreateDataFrame(spark: SparkSession, rdd: RDD[InternalRow], schema: StructType,
+                              isStreaming: Boolean = false): DataFrame
 
   /**
    * Creates instance of [[HoodieAvroSerializer]] providing for ability to serialize
