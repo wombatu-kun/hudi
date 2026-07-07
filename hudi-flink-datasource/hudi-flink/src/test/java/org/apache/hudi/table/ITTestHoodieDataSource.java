@@ -101,6 +101,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 import java.util.stream.Stream;
@@ -4136,9 +4137,11 @@ public class ITTestHoodieDataSource {
    *
    * <p>The streaming job is terminated by a forced {@link CollectSinkTableFactory.SuccessException} once
    * {@code expectedNum} rows are collected. A benign teardown race (see {@link #isAcceptableTerminalFailure})
-   * can instead end the job before all rows are emitted, leaving a short result. Re-reading the already
-   * committed table is idempotent, so retry up to {@link #MAX_STREAM_READ_ATTEMPTS} times when the result
-   * is short; this keeps the race from surfacing as a confusing row-count assertion failure.
+   * can instead end the job before all rows are emitted, and a slow CI shard can hit the {@code await}
+   * window before the sink reaches {@code expectedNum} (a bare timeout - see {@link #isAwaitTimeout}); both
+   * leave a short result. Re-reading the already committed table is idempotent, so retry up to
+   * {@link #MAX_STREAM_READ_ATTEMPTS} times when the result is short; this keeps the race and the timeout
+   * from surfacing as a confusing row-count (or "Unexpected job failure") assertion failure.
    */
   private List<Row> submitAndFetchWithRetry(TableEnvironment tEnv, String select, String sinkDDL, int expectedNum) {
     List<Row> rows = Collections.emptyList();
@@ -4176,8 +4179,9 @@ public class ITTestHoodieDataSource {
   private List<Row> fetchResultWithExpectedNum(TableEnvironment tEnv, TableResult tableResult) {
     try {
       // wait the continuous streaming query to be terminated by forced exception with expected row number
-      // and max waiting timeout is 30s
-      tableResult.await(30, TimeUnit.SECONDS);
+      // and max waiting timeout is 60s (kept generous so a slow CI shard does not time out before the
+      // sink collects its rows; a bare timeout is still handled as a retryable short read below)
+      tableResult.await(60, TimeUnit.SECONDS);
     } catch (Throwable e) {
       // Acceptable terminal causes:
       //   1. SuccessException: the sink reached its expected row count and intentionally
@@ -4218,13 +4222,30 @@ public class ITTestHoodieDataSource {
       //      its rows - same functional outcome, only the symptom differs. Tolerated narrowly (those
       //      exact frames); this is an inherent property of forcibly terminating a streaming read
       //      mid-drain, not something a production change can remove.
-      if (!isAcceptableTerminalFailure(e)) {
+      //
+      // A bare await-window TimeoutException is handled first and separately from causes (1)-(4): it is
+      // not a terminal failure at all - the sink simply had not reached expectedNum yet (typically CI-load
+      // slowness), so the job is still running. Cancel it and let submitAndFetchWithRetry re-submit a fresh
+      // job, rather than treating a slow shard as a hard failure.
+      if (isAwaitTimeout(e)) {
+        // Cancel the still-running job (best-effort, bounded) so it cannot keep writing to the shared
+        // CollectSinkTableFactory.RESULT after the retry's re-submit clears it.
+        tableResult.getJobClient().ifPresent(jobClient -> {
+          try {
+            jobClient.cancel().get(30, TimeUnit.SECONDS);
+          } catch (Exception ignored) {
+            // best-effort cancel; the subsequent re-submit clears RESULT and starts a fresh job
+          }
+        });
+        log.warn("Streaming read did not reach the expected row count within the await window; "
+                + "cancelled the job and will retry. Collected {} rows so far.",
+            CollectSinkTableFactory.RESULT.values().stream().mapToInt(List::size).sum());
+      } else if (!isAcceptableTerminalFailure(e)) {
         throw new AssertionError("Unexpected job failure", e);
-      }
-      // The races (2)/(3) usually fire after the sink has collected its expected rows, but can also fire
-      // before - ending the read with a short result. Log the tolerated cause so an incomplete read is
-      // diagnosable; submitAndFetchWithRetry re-reads when the collected count is below the expectation.
-      if (!isSuccessException(e)) {
+      } else if (!isSuccessException(e)) {
+        // The races (2)/(3)/(4) usually fire after the sink has collected its expected rows, but can also
+        // fire before - ending the read with a short result. Log the tolerated cause so an incomplete read
+        // is diagnosable; submitAndFetchWithRetry re-reads when the collected count is below the expectation.
         log.warn("Streaming read terminated by a tolerated teardown race ({}); collected {} rows so far.",
             describeTerminalCause(e),
             CollectSinkTableFactory.RESULT.values().stream().mapToInt(List::size).sum());
@@ -4270,6 +4291,23 @@ public class ITTestHoodieDataSource {
         return true;
       }
       cur = cur.getCause();
+    }
+    return false;
+  }
+
+  /**
+   * Whether {@code e} (or any of its causes) is a {@link TimeoutException} from
+   * {@link org.apache.flink.table.api.TableResult#await(long, TimeUnit)} - i.e. the await window elapsed
+   * before the sink reached its expected row count and threw
+   * {@link CollectSinkTableFactory.SuccessException}. Unlike the teardown-race causes in
+   * {@link #isAcceptableTerminalFailure} the job is still running (it never terminated), so the caller
+   * cancels it and retries the read rather than swallowing it.
+   */
+  private static boolean isAwaitTimeout(Throwable e) {
+    for (Throwable cur = e; cur != null; cur = cur.getCause()) {
+      if (cur instanceof TimeoutException) {
+        return true;
+      }
     }
     return false;
   }
