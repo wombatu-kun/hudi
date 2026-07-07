@@ -69,7 +69,7 @@ public class TestHiveTableSchemaEvolution {
   }
 
   @AfterEach
-  public void clean() {
+  public void clean() throws IOException {
     if (spark != null) {
       spark.close();
     }

@@ -26,7 +26,7 @@ import org.apache.hudi.config.{HoodieCompactionConfig, HoodieWriteConfig}
 import org.apache.hudi.testutils.HoodieClientTestUtils.createMetaClient
 import org.apache.hudi.testutils.SparkClientFunctionalTestHarness
 import org.apache.hudi.testutils.SparkClientFunctionalTestHarness.getSparkSqlConf
-import org.apache.hudi.{DataSourceReadOptions, DataSourceWriteOptions, DefaultSource, HoodieBaseRelation, HoodieSparkUtils, HoodieUnsafeRDD}
+import org.apache.hudi.{DataSourceReadOptions, DataSourceWriteOptions, DefaultSource, HoodieBaseRelation, HoodieSparkUtils, HoodieUnsafeRDD, SparkAdapterSupport}
 
 import org.apache.avro.Schema
 import org.apache.calcite.runtime.SqlFunctions.abs
@@ -34,14 +34,14 @@ import org.apache.parquet.hadoop.util.counters.BenchmarkCounter
 import org.apache.spark.SparkConf
 import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.{Dataset, HoodieUnsafeUtils, Row, SaveMode}
+import org.apache.spark.sql.{Dataset, Row, SaveMode}
 import org.junit.jupiter.api.Assertions.{assertEquals, assertFalse, assertTrue, fail}
 import org.junit.jupiter.api.{Disabled, Tag, Test}
 
 import scala.collection.JavaConverters._
 
 @Tag("functional")
-class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with Logging {
+class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with Logging with SparkAdapterSupport {
 
   val defaultWriteOpts = Map(
     "hoodie.insert.shuffle.parallelism" -> "4",
@@ -71,7 +71,7 @@ class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with 
     // Stats for the reads fetching only _projected_ columns (note how amount of bytes read
     // increases along w/ the # of columns)
     val projectedColumnsReadStats: Array[(String, Long)] =
-      if (HoodieSparkUtils.isSpark3)
+      if (HoodieSparkUtils.isSpark3 || HoodieSparkUtils.gteqSpark4_0)
         Array(
           ("rider", 2363),
           ("rider,driver", 2463),
@@ -100,7 +100,7 @@ class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with 
     // Stats for the reads fetching only _projected_ columns (note how amount of bytes read
     // increases along w/ the # of columns)
     val projectedColumnsReadStats: Array[(String, Long)] =
-      if (HoodieSparkUtils.isSpark3)
+      if (HoodieSparkUtils.isSpark3 || HoodieSparkUtils.gteqSpark4_0)
         Array(
           ("rider", 2452),
           ("rider,driver", 2552),
@@ -122,7 +122,7 @@ class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with 
     // Stats for the reads fetching only _projected_ columns (note how amount of bytes read
     // increases along w/ the # of columns) in Read Optimized mode (which is essentially equivalent to COW)
     val projectedColumnsReadStatsReadOptimized: Array[(String, Long)] =
-      if (HoodieSparkUtils.isSpark3)
+      if (HoodieSparkUtils.isSpark3 || HoodieSparkUtils.gteqSpark4_0)
         Array(
           ("rider", 2363),
           ("rider,driver", 2463),
@@ -156,7 +156,7 @@ class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with 
     // Stats for the reads fetching only _projected_ columns (note how amount of bytes read
     // increases along w/ the # of columns)
     val projectedColumnsReadStats: Array[(String, Long)] =
-      if (HoodieSparkUtils.isSpark3)
+      if (HoodieSparkUtils.isSpark3 || HoodieSparkUtils.gteqSpark4_0)
         Array(
           ("rider", 2452),
           ("rider,driver", 2552),
@@ -178,7 +178,7 @@ class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with 
     // Stats for the reads fetching only _projected_ columns (note how amount of bytes read
     // increases along w/ the # of columns) in Read Optimized mode (which is essentially equivalent to COW)
     val projectedColumnsReadStatsReadOptimized: Array[(String, Long)] =
-      if (HoodieSparkUtils.isSpark3)
+      if (HoodieSparkUtils.isSpark3 || HoodieSparkUtils.gteqSpark4_0)
         Array(
           ("rider", 2363),
           ("rider,driver", 2463),
@@ -217,7 +217,7 @@ class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with 
     // Stats for the reads fetching only _projected_ columns (note how amount of bytes read
     // increases along w/ the # of columns)
     val projectedColumnsReadStats: Array[(String, Long)] =
-    if (HoodieSparkUtils.isSpark3)
+    if (HoodieSparkUtils.isSpark3 || HoodieSparkUtils.gteqSpark4_0)
       Array(
         ("rider", 2452),
         ("rider,driver", 2552),
@@ -233,7 +233,7 @@ class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with 
     // Stats for the reads fetching _all_ columns (note, how amount of bytes read
     // is invariant of the # of columns)
     val fullColumnsReadStats: Array[(String, Long)] =
-    if (HoodieSparkUtils.isSpark3)
+    if (HoodieSparkUtils.isSpark3 || HoodieSparkUtils.gteqSpark4_0)
       Array(
         ("rider", 14167),
         ("rider,driver", 14167),
@@ -270,7 +270,7 @@ class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with 
     // Stats for the reads fetching only _projected_ columns (note how amount of bytes read
     // increases along w/ the # of columns)
     val projectedColumnsReadStats: Array[(String, Long)] =
-      if (HoodieSparkUtils.isSpark3)
+      if (HoodieSparkUtils.isSpark3 || HoodieSparkUtils.gteqSpark4_0)
         Array(
           ("rider", 4219),
           ("rider,driver", 4279),
@@ -388,7 +388,7 @@ class TestParquetColumnProjection extends SparkClientFunctionalTestHarness with 
 
       val (rows, bytesRead) = measureBytesRead { () =>
         val rdd = relation.buildScan(targetColumns, Array.empty).asInstanceOf[HoodieUnsafeRDD]
-        HoodieUnsafeUtils.collect(rdd)
+        sparkAdapter.getUnsafeUtils.collect(rdd)
       }
 
       val targetRecordCount = tableState.targetRecordCount;

@@ -895,7 +895,11 @@ class TestCreateTable extends HoodieSparkSqlTestBase {
              |partitioned by (dt)
              |location '$tablePath'
              |""".stripMargin
-        )("It is not allowed to specify partition columns when the table schema is not defined.")
+        )(if (HoodieSparkUtils.gteqSpark4_0) {
+          "[SPECIFY_PARTITION_IS_NOT_ALLOWED]"
+        } else {
+          "It is not allowed to specify partition columns when the table schema is not defined."
+        })
 
         spark.sql(
           s"""
