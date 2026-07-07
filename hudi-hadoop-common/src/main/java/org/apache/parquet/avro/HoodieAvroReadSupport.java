@@ -18,14 +18,17 @@
 
 package org.apache.parquet.avro;
 
+import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.parquet.conf.ParquetConfiguration;
 import org.apache.parquet.schema.GroupType;
 import org.apache.parquet.schema.MessageType;
 import org.apache.parquet.schema.OriginalType;
 import org.apache.parquet.schema.Type;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -46,11 +49,7 @@ public class HoodieAvroReadSupport<T> extends AvroReadSupport<T> {
   @Override
   public ReadContext init(Configuration configuration, Map<String, String> keyValueMetaData, MessageType fileSchema) {
     boolean legacyMode = checkLegacyMode(fileSchema.getFields());
-    // support non-legacy list
-    if (!legacyMode && configuration.get(AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE) == null) {
-      configuration.set(AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE,
-          "false", "support reading avro from non-legacy map/list in parquet file");
-    }
+    adjustConfToReadWithFileProduceMode(legacyMode, configuration);
     ReadContext readContext = super.init(configuration, keyValueMetaData, fileSchema);
     MessageType requestedSchema = readContext.getRequestedSchema();
     // support non-legacy map. Convert non-legacy map to legacy map
@@ -60,6 +59,67 @@ public class HoodieAvroReadSupport<T> extends AvroReadSupport<T> {
       requestedSchema = new MessageType(requestedSchema.getName(), convertLegacyMap(requestedSchema.getFields()));
     }
     return new ReadContext(requestedSchema, readContext.getReadSupportMetadata());
+  }
+
+  /**
+   * Initializes the Avro read support for Parquet files using {@link ParquetConfiguration} (Avro 1.12.x+).
+   * This method overrides {@code AvroReadSupport#init} to handle legacy list structure compatibility
+   * and projection schema configuration.
+   *
+   * @param configuration    The Parquet configuration containing read settings and projection schema
+   * @param keyValueMetaData Key-value metadata from the Parquet file footer
+   * @param fileSchema       The schema of the Parquet file being read
+   * @return A {@link ReadContext} containing the projection schema and read support metadata
+   */
+  public ReadContext init(ParquetConfiguration configuration, Map<String, String> keyValueMetaData, MessageType fileSchema) {
+    boolean legacyMode = checkLegacyMode(fileSchema.getFields());
+    configuration.set(AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE, String.valueOf(legacyMode));
+    MessageType projection = fileSchema;
+    Map<String, String> metadata = new LinkedHashMap<String, String>();
+
+    String requestedProjectionString = configuration.get(AVRO_REQUESTED_PROJECTION);
+    if (requestedProjectionString != null) {
+      Schema avroRequestedProjection = new Schema.Parser().parse(requestedProjectionString);
+      Configuration conf = new Configuration();
+      configuration.forEach(entry -> conf.set(entry.getKey(), entry.getValue()));
+      projection = new AvroSchemaConverter(conf).convert(avroRequestedProjection);
+    }
+
+    String avroReadSchema = configuration.get("parquet.avro.read.schema");
+    if (avroReadSchema != null) {
+      metadata.put("avro.read.schema", avroReadSchema);
+    }
+
+    if (configuration.getBoolean(AVRO_COMPATIBILITY, AVRO_DEFAULT_COMPATIBILITY)) {
+      metadata.put(AVRO_COMPATIBILITY, "true");
+    }
+
+    ReadContext readContext = new ReadContext(projection, metadata);
+    MessageType requestedSchema = readContext.getRequestedSchema();
+    // support non-legacy map. Convert non-legacy map to legacy map
+    // Because there is no AvroWriteSupport.WRITE_OLD_MAP_STRUCTURE
+    // according to AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE
+    if (!legacyMode) {
+      requestedSchema = new MessageType(requestedSchema.getName(), convertLegacyMap(requestedSchema.getFields()));
+    }
+    return new ReadContext(requestedSchema, readContext.getReadSupportMetadata());
+  }
+
+  /**
+   * Here we want set config with which file has been written.
+   * Even though user may have overwritten {@link AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE},
+   * it's only applicable to how to produce new files(here is a read path).
+   * Later the config value {@link AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE} will still be used
+   * to write new file according to the user preferences.
+   **/
+  private void adjustConfToReadWithFileProduceMode(boolean isLegacyModeWrittenFile, Configuration configuration) {
+    if (isLegacyModeWrittenFile) {
+      configuration.set(AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE,
+          "true", "support reading avro from legacy map/list in parquet file");
+    } else {
+      configuration.set(AvroWriteSupport.WRITE_OLD_LIST_STRUCTURE,
+          "false", "support reading avro from non-legacy map/list in parquet file");
+    }
   }
 
   /**
@@ -89,25 +149,23 @@ public class HoodieAvroReadSupport<T> extends AvroReadSupport<T> {
    *      }
    *    }
    */
-  private boolean checkLegacyMode(List<Type> parquetFields) {
-    for (Type type : parquetFields) {
+  private static boolean checkLegacyMode(List<Type> parquetFields) {
+    return parquetFields.stream().anyMatch(type -> {
       if (!type.isPrimitive()) {
         GroupType groupType = type.asGroupType();
         OriginalType originalType = groupType.getOriginalType();
         if (originalType == OriginalType.MAP
-            && groupType.getFields().get(0).getOriginalType() != OriginalType.MAP_KEY_VALUE) {
-          return false;
+            && !groupType.getFields().get(0).getName().equals("key_value")) {
+          return true;
         }
         if (originalType == OriginalType.LIST
-            && !groupType.getType(0).getName().equals("array")) {
-          return false;
+            && !groupType.getType(0).getName().equals("list")) {
+          return true;
         }
-        if (!checkLegacyMode(groupType.getFields())) {
-          return false;
-        }
+        return checkLegacyMode(groupType.getFields());
       }
-    }
-    return true;
+      return false;
+    });
   }
 
   /**
