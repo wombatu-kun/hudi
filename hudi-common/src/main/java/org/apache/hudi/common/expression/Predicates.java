@@ -486,6 +486,13 @@ public class Predicates {
       return false;
     }
 
+    @Override
+    public String toString() {
+      // The left expression is absent for the metadata table key filters, so it must not be dereferenced.
+      return left + ".startsWithAny("
+          + right.stream().map(Expression::toString).collect(Collectors.joining(",", "(", ")")) + ")";
+    }
+
     public List<Expression> getRightChildren() {
       return right;
     }
