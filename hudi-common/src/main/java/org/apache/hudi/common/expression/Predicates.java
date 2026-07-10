@@ -263,7 +263,7 @@ public class Predicates {
 
     @Override
     public String toString() {
-      return getLeft().toString() + ".startWith(" + getRight().toString() + ")";
+      return getLeft().toString() + ".startsWith(" + getRight().toString() + ")";
     }
 
     @Override
@@ -488,9 +488,10 @@ public class Predicates {
 
     @Override
     public String toString() {
-      // The left expression is absent for the metadata table key filters, so it must not be dereferenced.
+      // Only the left expression is absent: HoodieBackedTableMetadata passes null for the metadata table
+      // key filters, so it must not be dereferenced. The right operands are always non-null literals.
       return left + ".startsWithAny("
-          + right.stream().map(Expression::toString).collect(Collectors.joining(",", "(", ")")) + ")";
+          + right.stream().map(Expression::toString).collect(Collectors.joining(",")) + ")";
     }
 
     public List<Expression> getRightChildren() {

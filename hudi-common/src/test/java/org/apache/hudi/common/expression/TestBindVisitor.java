@@ -46,7 +46,7 @@ class TestBindVisitor {
     IllegalArgumentException e =
         assertThrows(IllegalArgumentException.class, () -> startsWithAny.accept(bindVisitor));
 
-    assertTrue(e.getMessage().contains("NameReference(name=a).startsWithAny((Ja))"), e::getMessage);
+    assertTrue(e.getMessage().contains("NameReference(name=a).startsWithAny(Ja)"), e::getMessage);
     assertFalse(e.getMessage().contains(BindVisitor.class.getName()), e::getMessage);
     assertTrue(e.getMessage().contains(" cannot be visited as predicate"), e::getMessage);
   }
