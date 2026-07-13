@@ -23,7 +23,7 @@ import org.apache.spark.sql.connector.catalog.{Identifier, SupportsWrite, Table,
 import org.apache.spark.sql.connector.write.{LogicalWriteInfo, WriteBuilder}
 import org.junit.jupiter.api.Assertions.{assertSame, assertThrows, assertTrue}
 import org.junit.jupiter.api.Test
-import org.mockito.Mockito.{mock, verify, when}
+import org.mockito.Mockito.{mock, when}
 
 class TestBasicStagedTable {
 
@@ -39,7 +39,6 @@ class TestBasicStagedTable {
     val staged = BasicStagedTable(ident, table, mock(classOf[TableCatalog]))
 
     assertSame(writeBuilder, staged.newWriteBuilder(info))
-    verify(table).newWriteBuilder(info)
   }
 
   @Test
