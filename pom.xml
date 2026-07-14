@@ -707,9 +707,7 @@
               <!-- local files not in version control -->
               <exclude>**/*.iml</exclude>
               <exclude>.mvn/**</exclude>
-              <!-- Match at any depth: the source-release checks copy the tree into a scratch
-                   directory, and a root-anchored pattern would not exclude the copy. -->
-              <exclude>**/hudi-trino-plugin/**</exclude>
+              <exclude>hudi-trino-plugin/**</exclude>
             </excludes>
           </configuration>
           <executions>
