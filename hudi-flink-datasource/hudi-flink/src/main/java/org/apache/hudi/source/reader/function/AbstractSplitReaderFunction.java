@@ -60,11 +60,11 @@ public abstract class AbstractSplitReaderFunction implements SplitReaderFunction
   protected final boolean emitDelete;
   private transient HoodieWriteConfig writeConfig;
   private transient org.apache.hadoop.conf.Configuration hadoopConf;
+  private transient RowDataSerializer copySerializer;
 
   // Per-split cursor state (split-fetcher thread only).
   private transient ClosableIterator<RowData> currentIterator;
   private transient long nextRecordOffset;
-  private transient RowDataSerializer copySerializer;
 
   public AbstractSplitReaderFunction(
       Configuration conf,

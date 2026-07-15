@@ -223,7 +223,7 @@ public class TestHoodieSourceSplitReader {
 
     reader.fetch();
 
-    assertEquals(1, readerFunction.getReadCount());
+    assertEquals(1, readerFunction.getOpenCount());
     assertEquals(split, readerFunction.getLastReadSplit());
   }
 
@@ -248,7 +248,7 @@ public class TestHoodieSourceSplitReader {
 
     assertNotNull(result);
     assertNull(result.nextSplit());
-    assertEquals(0, readerFunction.getReadCount(), "Should not read any splits");
+    assertEquals(0, readerFunction.getOpenCount(), "Should not read any splits");
   }
 
   @Test
@@ -350,7 +350,7 @@ public class TestHoodieSourceSplitReader {
         "split2 should be drained as finished once limit is reached");
     assertNull(drainBatch.nextSplit());
     // readerFunction was opened only once (for split1, never for split2)
-    assertEquals(1, readerFunction.getReadCount());
+    assertEquals(1, readerFunction.getOpenCount());
   }
 
   @Test
@@ -371,7 +371,7 @@ public class TestHoodieSourceSplitReader {
     assertTrue(finished.contains(split2.splitId()));
     assertNull(batch.nextSplit());
     // readerFunction was never opened
-    assertEquals(0, readerFunction.getReadCount());
+    assertEquals(0, readerFunction.getOpenCount());
   }
 
   @Test
@@ -496,7 +496,7 @@ public class TestHoodieSourceSplitReader {
     RecordsWithSplitIds<HoodieRecordWithPosition<String>> b3 = reader.fetch();
     assertTrue(b3.finishedSplits().contains(split.splitId()));
 
-    assertEquals(1, readerFunction.getReadCount(), "split opened exactly once across minibatches");
+    assertEquals(1, readerFunction.getOpenCount(), "split opened exactly once across minibatches");
     assertEquals(1, readerFunction.getCloseCurrentSplitCount(), "split closed exactly once at EOF");
   }
 
@@ -635,7 +635,7 @@ public class TestHoodieSourceSplitReader {
     }
 
     // Number of splits opened; mirrors the old per-split read() count.
-    public int getReadCount() {
+    public int getOpenCount() {
       return openCount;
     }
 
