@@ -4214,20 +4214,20 @@ public class ITTestHoodieDataSource {
   }
 
   /**
-   * Whether {@code e} (or any of its causes) is a {@link TimeoutException} from
+   * Whether {@code e} is a bare {@link TimeoutException} thrown directly by
    * {@link org.apache.flink.table.api.TableResult#await(long, TimeUnit)} - i.e. the await window elapsed
    * before the sink reached its expected row count and threw
-   * {@link CollectSinkTableFactory.SuccessException}. Unlike the teardown-race causes in
-   * {@link #isAcceptableTerminalFailure} the job is still running (it never terminated), so the caller
-   * cancels it and retries the read rather than swallowing it.
+   * {@link CollectSinkTableFactory.SuccessException}, leaving the job still running (never terminated),
+   * so the caller cancels it and retries the read rather than swallowing it.
+   *
+   * <p>Only the top-level exception is inspected, never the cause chain: {@code await} throws its own
+   * timeout bare, whereas a genuine job failure arrives wrapped in an {@link ExecutionException} that
+   * may itself embed a {@link TimeoutException} (checkpoint expiry, RPC timeout). Walking the chain
+   * would misclassify such a real failure as a slow shard - cancel it, retry, and finally report a
+   * row-count mismatch with the true cause discarded.
    */
   private static boolean isAwaitTimeout(Throwable e) {
-    for (Throwable cur = e; cur != null; cur = cur.getCause()) {
-      if (cur instanceof TimeoutException) {
-        return true;
-      }
-    }
-    return false;
+    return e instanceof TimeoutException;
   }
 
   /**
