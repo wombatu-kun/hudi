@@ -284,7 +284,8 @@ public class TestHoodieSplitReaderFunction {
 
   @Test
   public void testReadMethodSignature() {
-    // Verify that the read method returns CloseableIterator
+    // Verify the reader function constructs via its public signature (the read path is driven
+    // through open/readBatch on the split-fetcher thread).
     HoodieSplitReaderFunction function =
         new HoodieSplitReaderFunction(
             conf,

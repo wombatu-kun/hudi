@@ -19,7 +19,6 @@
 package org.apache.hudi.source.reader;
 
 import org.apache.hudi.common.util.Option;
-import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.source.reader.function.SplitReaderFunction;
 import org.apache.hudi.source.split.HoodieSourceSplit;
 import org.apache.hudi.source.split.SerializableComparator;
@@ -33,11 +32,14 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -347,7 +349,7 @@ public class TestHoodieSourceSplitReader {
     assertTrue(drainBatch.finishedSplits().contains(split2.splitId()),
         "split2 should be drained as finished once limit is reached");
     assertNull(drainBatch.nextSplit());
-    // readerFunction.read() was called only once (for split1, never for split2)
+    // readerFunction was opened only once (for split1, never for split2)
     assertEquals(1, readerFunction.getReadCount());
   }
 
@@ -368,7 +370,7 @@ public class TestHoodieSourceSplitReader {
     assertTrue(finished.contains(split1.splitId()));
     assertTrue(finished.contains(split2.splitId()));
     assertNull(batch.nextSplit());
-    // readerFunction.read() was never called
+    // readerFunction was never opened
     assertEquals(0, readerFunction.getReadCount());
   }
 
@@ -449,6 +451,78 @@ public class TestHoodieSourceSplitReader {
     assertEquals(5, drainRecordCount(batch));
   }
 
+  // -------------------------------------------------------------------------
+  //  Minibatch / resume tests
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void testSplitSpanningMultipleMinibatches() throws IOException {
+    // A split larger than the mini-batch bound (2048) is emitted as multiple non-finished batches,
+    // then one finish signal. The reader function is opened once and closed once across the split,
+    // and the record offset stays continuous across the minibatch boundary.
+    int n = 2049;
+    List<String> testData = IntStream.range(0, n).mapToObj(i -> "r" + i).collect(Collectors.toList());
+    TestSplitReaderFunction readerFunction = new TestSplitReaderFunction(testData);
+    HoodieSourceSplitReader<String> reader =
+        new HoodieSourceSplitReader<>(TABLE_NAME, readerContext, readerFunction, null, Option.empty());
+
+    HoodieSourceSplit split = createTestSplit(1, "file1");
+    reader.handleSplitsChanges(new SplitsAddition<>(Collections.singletonList(split)));
+
+    // First minibatch: 2048 records, offsets 1..2048, split not yet finished.
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b1 = reader.fetch();
+    assertEquals(split.splitId(), b1.nextSplit());
+    long lastOffset = 0L;
+    int c1 = 0;
+    HoodieRecordWithPosition<String> rec;
+    while ((rec = b1.nextRecordFromSplit()) != null) {
+      lastOffset = rec.recordOffset();
+      c1++;
+    }
+    assertEquals(2048, c1);
+    assertEquals(2048L, lastOffset);
+    assertTrue(b1.finishedSplits().isEmpty(), "split not finished after the first minibatch");
+
+    // Second minibatch: the remaining record, offset continues at 2049.
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b2 = reader.fetch();
+    assertEquals(split.splitId(), b2.nextSplit());
+    HoodieRecordWithPosition<String> only = b2.nextRecordFromSplit();
+    assertNotNull(only);
+    assertEquals(2049L, only.recordOffset());
+    assertNull(b2.nextRecordFromSplit());
+    assertTrue(b2.finishedSplits().isEmpty());
+
+    // Third fetch: split exhausted -> finish signal.
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b3 = reader.fetch();
+    assertTrue(b3.finishedSplits().contains(split.splitId()));
+
+    assertEquals(1, readerFunction.getReadCount(), "split opened exactly once across minibatches");
+    assertEquals(1, readerFunction.getCloseCurrentSplitCount(), "split closed exactly once at EOF");
+  }
+
+  @Test
+  public void testResumeSkipsConsumedRecords() throws IOException {
+    // A recovered split carries a consumed offset; open() skips that many records and the emitted
+    // offsets resume at consumed+1.
+    List<String> testData = Arrays.asList("r1", "r2", "r3", "r4", "r5");
+    TestSplitReaderFunction readerFunction = new TestSplitReaderFunction(testData);
+    HoodieSourceSplitReader<String> reader =
+        new HoodieSourceSplitReader<>(TABLE_NAME, readerContext, readerFunction, null, Option.empty());
+
+    HoodieSourceSplit split = createTestSplit(1, "file1");
+    split.updatePosition(0, 2L); // 2 records already consumed before recovery
+    reader.handleSplitsChanges(new SplitsAddition<>(Collections.singletonList(split)));
+
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> batch = reader.fetch();
+    assertEquals(split.splitId(), batch.nextSplit());
+    HoodieRecordWithPosition<String> first = batch.nextRecordFromSplit();
+    assertNotNull(first);
+    assertEquals("r3", first.record(), "should resume past the 2 consumed records");
+    assertEquals(3L, first.recordOffset(), "offset resumes at consumed + 1");
+    // r4, r5 remain
+    assertEquals(2, drainRecordCount(batch));
+  }
+
   /**
    * Fetches the next batch that contains actual split data, skipping split-finish signal batches.
    * Split-finish batches have non-empty {@code finishedSplits()} but no records.
@@ -495,13 +569,20 @@ public class TestHoodieSourceSplitReader {
   }
 
   /**
-   * Test implementation of SplitReaderFunction.
+   * Test implementation of the stateful {@link SplitReaderFunction} cursor contract: {@code open}
+   * materializes the split's data and honors the consumed-offset skip, {@code readBatch} drains a
+   * bounded minibatch, and {@code closeCurrentSplit}/{@code close} release it.
    */
   private static class TestSplitReaderFunction implements SplitReaderFunction<String> {
     private final List<String> testData;
-    private int readCount = 0;
+    private int openCount = 0;
+    private int closeCurrentSplitCount = 0;
     private HoodieSourceSplit lastReadSplit = null;
     private boolean closed = false;
+
+    // per-split cursor
+    private Iterator<String> cursor;
+    private long nextRecordOffset;
 
     public TestSplitReaderFunction() {
       this(Collections.emptyList());
@@ -512,25 +593,54 @@ public class TestHoodieSourceSplitReader {
     }
 
     @Override
-    public RecordsWithSplitIds<HoodieRecordWithPosition<String>> read(HoodieSourceSplit split) {
-      readCount++;
+    public void open(HoodieSourceSplit split) {
+      openCount++;
       lastReadSplit = split;
-      ClosableIterator<String> iterator = createClosableIterator(testData);
-      return BatchRecords.forRecords(
-          split.splitId(),
-          iterator,
-          split.getFileOffset(),
-          split.getConsumed()
-      );
+      cursor = testData.iterator();
+      long consumed = split.getConsumed();
+      for (long i = 0; i < consumed; i++) {
+        if (cursor.hasNext()) {
+          cursor.next();
+        } else {
+          throw new IllegalStateException(
+              "Invalid starting record offset " + consumed + " for split " + split.splitId());
+        }
+      }
+      nextRecordOffset = consumed;
     }
 
     @Override
-    public void close() throws Exception {
+    public BatchRecords<String> readBatch(HoodieSourceSplit split, int batchSize) {
+      List<String> buffer = new ArrayList<>();
+      while (buffer.size() < batchSize && cursor.hasNext()) {
+        buffer.add(cursor.next());
+      }
+      if (buffer.isEmpty()) {
+        return null;
+      }
+      long startingRecordOffset = nextRecordOffset;
+      nextRecordOffset += buffer.size();
+      return BatchRecords.forRecords(split.splitId(), buffer, split.getFileOffset(), startingRecordOffset);
+    }
+
+    @Override
+    public void closeCurrentSplit() {
+      closeCurrentSplitCount++;
+      cursor = null;
+    }
+
+    @Override
+    public void close() {
       closed = true;
     }
 
+    // Number of splits opened; mirrors the old per-split read() count.
     public int getReadCount() {
-      return readCount;
+      return openCount;
+    }
+
+    public int getCloseCurrentSplitCount() {
+      return closeCurrentSplitCount;
     }
 
     public HoodieSourceSplit getLastReadSplit() {
@@ -539,26 +649,6 @@ public class TestHoodieSourceSplitReader {
 
     public boolean isClosed() {
       return closed;
-    }
-
-    private ClosableIterator<String> createClosableIterator(List<String> items) {
-      Iterator<String> iterator = items.iterator();
-      return new ClosableIterator<String>() {
-        @Override
-        public void close() {
-          // No-op
-        }
-
-        @Override
-        public boolean hasNext() {
-          return iterator.hasNext();
-        }
-
-        @Override
-        public String next() {
-          return iterator.next();
-        }
-      };
     }
   }
 }

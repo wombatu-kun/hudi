@@ -45,15 +45,22 @@ import java.util.Set;
 /**
  * The split reader of Hoodie source.
  *
- * <p>Each call to {@link #fetch()} reads one split and returns it as a single
- * {@link RecordsWithSplitIds} batch. Flink's {@code SourceReaderBase} is responsible for
- * draining all records from the batch (via {@code nextRecordFromSplit()}) and marking
- * the split finished (via {@code finishedSplits()}) before calling {@link #fetch()} again.
+ * <p>Each call to {@link #fetch()} returns one bounded minibatch of the currently open split, so a
+ * single split spans multiple {@code fetch()} calls. When the open split is exhausted its resources
+ * are closed on this (split-fetcher) thread and a finish signal ({@code finishedSplits()}) is
+ * returned so Flink's {@code SourceReaderBase} can advance / reach end-of-input. All record reading
+ * and resource teardown for a split therefore happen on the same thread, which removes the
+ * cross-thread teardown race a live-iterator batch would be exposed to.
  *
  * @param <T> record type
  */
 @Slf4j
 public class HoodieSourceSplitReader<T> implements SplitReader<HoodieRecordWithPosition<T>, HoodieSourceSplit> {
+  // Upper bound on the number of records materialized per fetch() call (one minibatch). Kept as a
+  // fixed constant for now (mirrors RecordIterators.DEFAULT_BATCH_SIZE); it can be promoted to a
+  // Flink option later if a tunable per-fetch bound is ever needed.
+  private static final int DEFAULT_MINI_BATCH_SIZE = 2048;
+
   private final SerializableComparator<HoodieSourceSplit> splitComparator;
   private final Queue<HoodieSourceSplit> splits;
   private final FlinkStreamReadMetrics readerMetrics;
@@ -77,27 +84,34 @@ public class HoodieSourceSplitReader<T> implements SplitReader<HoodieRecordWithP
 
   @Override
   public RecordsWithSplitIds<HoodieRecordWithPosition<T>> fetch() throws IOException {
-    // finish current split.
-    if (currentSplit != null) {
-      return finishSplit();
-    }
-
-    // Limit already satisfied: drain any remaining locally-queued splits as immediately finished
-    // so that Flink's SourceReaderBase can reach end-of-input cleanly.
-    if (recordLimiter.map(RecordLimiter::isLimitReached).orElse(false)) {
-      return drainRemainingAsSplitsFinished();
-    }
-
-    HoodieSourceSplit nextSplit = splits.poll();
-    if (nextSplit != null) {
+    if (currentSplit == null) {
+      // Limit already satisfied: drain any remaining locally-queued splits as immediately finished
+      // so that Flink's SourceReaderBase can reach end-of-input cleanly.
+      if (recordLimiter.map(RecordLimiter::isLimitReached).orElse(false)) {
+        return drainRemainingAsSplitsFinished();
+      }
+      HoodieSourceSplit nextSplit = splits.poll();
+      if (nextSplit == null) {
+        // return an empty result, which will lead to split fetch to be idle.
+        // SplitFetcherManager will then close idle fetcher.
+        return new RecordsBySplits<>(Collections.emptyMap(), Collections.emptySet());
+      }
       currentSplit = nextSplit;
-      RecordsWithSplitIds<HoodieRecordWithPosition<T>> records = readerFunction.read(nextSplit);
-      return recordLimiter.map(rl -> rl.wrap(records)).orElse(records);
-    } else {
-      // return an empty result, which will lead to split fetch to be idle.
-      // SplitFetcherManager will then close idle fetcher.
-      return new RecordsBySplits<>(Collections.emptyMap(), Collections.emptySet());
+      readerFunction.open(currentSplit);
     }
+
+    // Read the next bounded minibatch of the open split, unless the global limit is already reached.
+    if (!recordLimiter.map(RecordLimiter::isLimitReached).orElse(false)) {
+      BatchRecords<T> batch = readerFunction.readBatch(currentSplit, DEFAULT_MINI_BATCH_SIZE);
+      if (batch != null) {
+        return recordLimiter.map(rl -> rl.wrap(batch)).orElse(batch);
+      }
+    }
+
+    // Split exhausted (or the limit was reached mid-split): close its resources on this
+    // (split-fetcher) thread first, then emit the finish signal so SourceReaderBase can advance.
+    readerFunction.closeCurrentSplit();
+    return finishSplit();
   }
 
   @Override

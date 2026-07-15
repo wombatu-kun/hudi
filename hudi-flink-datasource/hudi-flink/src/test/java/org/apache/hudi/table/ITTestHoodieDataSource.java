@@ -45,7 +45,6 @@ import org.apache.hudi.storage.StoragePath;
 import org.apache.hudi.storage.hadoop.HadoopStorageConfiguration;
 import org.apache.hudi.table.catalog.HoodieCatalogTestUtils;
 import org.apache.hudi.table.catalog.HoodieHiveCatalog;
-import org.apache.hudi.table.format.cdc.CdcIterators;
 import org.apache.hudi.util.StreamerUtil;
 import org.apache.hudi.utils.FlinkMiniCluster;
 import org.apache.hudi.utils.TestConfigurations;
@@ -95,7 +94,6 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Set;
 import java.util.TreeSet;
@@ -4136,12 +4134,11 @@ public class ITTestHoodieDataSource {
    * the collected rows.
    *
    * <p>The streaming job is terminated by a forced {@link CollectSinkTableFactory.SuccessException} once
-   * {@code expectedNum} rows are collected. A benign teardown race (see {@link #isAcceptableTerminalFailure})
-   * can instead end the job before all rows are emitted, and a slow CI shard can hit the {@code await}
-   * window before the sink reaches {@code expectedNum} (a bare timeout - see {@link #isAwaitTimeout}); both
-   * leave a short result. Re-reading the already committed table is idempotent, so retry up to
-   * {@link #MAX_STREAM_READ_ATTEMPTS} times when the result is short; this keeps the race and the timeout
-   * from surfacing as a confusing row-count (or "Unexpected job failure") assertion failure.
+   * {@code expectedNum} rows are collected. On a slow CI shard the {@code await} window can elapse before
+   * the sink reaches {@code expectedNum} (a bare timeout - see {@link #isAwaitTimeout}), leaving a short
+   * result. Re-reading the already committed table is idempotent, so retry up to
+   * {@link #MAX_STREAM_READ_ATTEMPTS} times when the result is short; this keeps a slow shard from
+   * surfacing as a confusing row-count (or "Unexpected job failure") assertion failure.
    */
   private List<Row> submitAndFetchWithRetry(TableEnvironment tEnv, String select, String sinkDDL, int expectedNum) {
     List<Row> rows = Collections.emptyList();
@@ -4183,50 +4180,16 @@ public class ITTestHoodieDataSource {
       // sink collects its rows; a bare timeout is still handled as a retryable short read below)
       tableResult.await(60, TimeUnit.SECONDS);
     } catch (Throwable e) {
-      // Acceptable terminal causes:
-      //   1. SuccessException: the sink reached its expected row count and intentionally
-      //      threw to terminate the streaming job. This is the happy path.
-      //   2. IOException("Stream is closed!") wrapped as HoodieIOException: a benign
-      //      error-attribution race between the source-side cascading-shutdown path and
-      //      the sink-side SuccessException terminator. When the sink throws
-      //      SuccessException to end the job, the chained source's SplitFetcher can close
-      //      the underlying Hadoop FSDataInputStream while the mailbox is still draining
-      //      a BatchRecords queued earlier; the next row-group read on the now-closed
-      //      stream surfaces an IOException("Stream is closed!"). With
-      //      restart-strategy.fixed-delay.attempts=0 (set in beforeEach to keep tests
-      //      deterministic) that IOException becomes the job's reported failure cause
-      //      instead of the sink's SuccessException, even though the sink has already
-      //      collected the expected rows by then - i.e. the functional outcome is
-      //      unchanged, only the error-attribution differs. Production paths correctly
-      //      fail the job on stream-closed-mid-read (the right behavior for real I/O
-      //      failures), so this tolerance is scoped to the SuccessException-based test
-      //      pattern below and is NOT mirrored in production code.
-      //   3. NullPointerException from ParquetColumnarRowSplitReader#readNextRowGroup: the
-      //      same benign teardown race as (2), observed with different timing. When the
-      //      SplitFetcher's close() fully completes first, ParquetColumnarRowSplitReader#close
-      //      nulls out its `reader` field, so the in-flight row-group read on the task thread
-      //      surfaces as a NullPointerException (reader.readNextRowGroup() on a null reader)
-      //      instead of an IOException("Stream is closed!"). Same functional outcome - the
-      //      sink has already collected the expected rows - only the error symptom differs.
-      //      Tolerated narrowly (an NPE originating from that exact frame) for the same
-      //      reason as (2), and likewise NOT mirrored in production code.
-      //   4. NullPointerException or NoSuchElementException from a CdcIterators nested iterator
-      //      (CdcFileSplitsIterator / BaseImageIterator): the CDC-read twin of the same teardown
-      //      race. The CDC split reader drains the iterator on the task thread while a force-terminated
-      //      job closes it on the split-fetcher thread. Unlike (2)/(3), the production read path here is
-      //      now thread-safe - CdcFileSplitsIterator synchronizes hasNext()/next()/close(), so there is
-      //      no torn-read NPE. But because BatchRecords calls hasNext() then next() as two separate
-      //      calls, a close() landing between them still ends the drain with a NoSuchElementException
-      //      from the now-closed iterator; with restart-strategy.fixed-delay.attempts=0 that benign
-      //      terminal signal becomes the job's reported failure even though the sink already collected
-      //      its rows - same functional outcome, only the symptom differs. Tolerated narrowly (those
-      //      exact frames); this is an inherent property of forcibly terminating a streaming read
-      //      mid-drain, not something a production change can remove.
+      // The only acceptable terminal cause is the sink reaching its expected row count and throwing
+      // SuccessException to terminate the streaming job (the happy path). The Source V2 read path now
+      // reads and closes each split's I/O on a single (split-fetcher) thread, so the former teardown
+      // races (a closed Parquet stream / a closed CDC iterator surfacing on the task thread) can no
+      // longer happen; any other terminal failure is a real error and fails the test.
       //
-      // A bare await-window TimeoutException is handled first and separately from causes (1)-(4): it is
-      // not a terminal failure at all - the sink simply had not reached expectedNum yet (typically CI-load
-      // slowness), so the job is still running. Cancel it and let submitAndFetchWithRetry re-submit a fresh
-      // job, rather than treating a slow shard as a hard failure.
+      // A bare await-window TimeoutException is not a terminal failure at all - the sink simply had not
+      // reached expectedNum yet (typically CI-load slowness), so the job is still running. Cancel it and
+      // let submitAndFetchWithRetry re-submit a fresh job, rather than treating a slow shard as a hard
+      // failure.
       if (isAwaitTimeout(e)) {
         // Cancel the still-running job (best-effort, bounded) so it cannot keep writing to the shared
         // CollectSinkTableFactory.RESULT after the retry's re-submit clears it.
@@ -4240,59 +4203,14 @@ public class ITTestHoodieDataSource {
         log.warn("Streaming read did not reach the expected row count within the await window; "
                 + "cancelled the job and will retry. Collected {} rows so far.",
             CollectSinkTableFactory.RESULT.values().stream().mapToInt(List::size).sum());
-      } else if (!isAcceptableTerminalFailure(e)) {
-        throw new AssertionError("Unexpected job failure", e);
       } else if (!isSuccessException(e)) {
-        // The races (2)/(3)/(4) usually fire after the sink has collected its expected rows, but can also
-        // fire before - ending the read with a short result. Log the tolerated cause so an incomplete read
-        // is diagnosable; submitAndFetchWithRetry re-reads when the collected count is below the expectation.
-        log.warn("Streaming read terminated by a tolerated teardown race ({}); collected {} rows so far.",
-            describeTerminalCause(e),
-            CollectSinkTableFactory.RESULT.values().stream().mapToInt(List::size).sum());
+        throw new AssertionError("Unexpected job failure", e);
       }
     }
     tEnv.executeSql("DROP TABLE IF EXISTS sink");
     return CollectSinkTableFactory.RESULT.values().stream()
         .flatMap(Collection::stream)
         .collect(Collectors.toList());
-  }
-
-  /**
-   * Whether {@code e} (or any of its causes) is one of the terminal failures that
-   * {@link #fetchResultWithExpectedNum} is allowed to swallow. See the comment at the call
-   * site for the rationale.
-   */
-  private static boolean isAcceptableTerminalFailure(Throwable e) {
-    Throwable cur = e;
-    while (cur != null) {
-      if (cur instanceof CollectSinkTableFactory.SuccessException) {
-        return true;
-      }
-      String msg = cur.getMessage();
-      if (msg != null && msg.contains("Stream is closed")) {
-        return true;
-      }
-      // The NPE twin of the "Stream is closed!" teardown race (cause #3 at the call site):
-      // a NullPointerException whose own stack trace originates from
-      // ParquetColumnarRowSplitReader#readNextRowGroup, i.e. reader.readNextRowGroup() ran on a
-      // null `reader` that ParquetColumnarRowSplitReader#close had just nulled out. Scoped to
-      // that exact frame so genuine NPEs - and the legitimate IOException("expecting more
-      // rows...") thrown from the same method - still fail the test.
-      if (isNullPointerException(cur) && containsReadNextRowGroupFrame(cur)) {
-        return true;
-      }
-      // Cause #4 (see the call site): the CDC-iterator teardown twin. A close() on the split-fetcher
-      // thread races the task-thread drain of a queued batch. The production read path is synchronized
-      // (CdcFileSplitsIterator), so this surfaces as a NoSuchElementException - or, at adjacent timing,
-      // an NPE - from a CdcIterators nested iterator, not a torn read. Scoped to those exact frames so
-      // genuine CDC read bugs (which are deterministic, not teardown-timed) still fail the test.
-      if ((isNullPointerException(cur) || isNoSuchElementException(cur))
-          && containsCdcIteratorTeardownFrame(cur)) {
-        return true;
-      }
-      cur = cur.getCause();
-    }
-    return false;
   }
 
   /**
@@ -4313,56 +4231,6 @@ public class ITTestHoodieDataSource {
   }
 
   /**
-   * True for a real {@link NullPointerException} as well as one wrapped in Flink's
-   * {@code SerializedThrowable} when the failure is propagated back from the cluster (its
-   * {@code toString()} preserves the original {@code java.lang.NullPointerException} prefix).
-   */
-  private static boolean isNullPointerException(Throwable t) {
-    return t instanceof NullPointerException
-        || t.toString().startsWith(NullPointerException.class.getName());
-  }
-
-  /**
-   * Whether {@code t}'s stack trace (preserved even through {@code SerializedThrowable})
-   * contains a {@code ParquetColumnarRowSplitReader#readNextRowGroup} frame.
-   */
-  private static boolean containsReadNextRowGroupFrame(Throwable t) {
-    for (StackTraceElement frame : t.getStackTrace()) {
-      if (frame.getClassName().endsWith("ParquetColumnarRowSplitReader")
-          && "readNextRowGroup".equals(frame.getMethodName())) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
-   * True for a real {@link NoSuchElementException} as well as one wrapped in Flink's
-   * {@code SerializedThrowable} when the failure is propagated back from the cluster (its
-   * {@code toString()} preserves the original {@code java.util.NoSuchElementException} prefix).
-   */
-  private static boolean isNoSuchElementException(Throwable t) {
-    return t instanceof NoSuchElementException
-        || t.toString().startsWith(NoSuchElementException.class.getName());
-  }
-
-  /**
-   * Whether {@code t}'s stack trace (preserved even through {@code SerializedThrowable}) contains a
-   * frame from one of the CDC read iterators that a teardown {@code close()} can null out mid-drain -
-   * {@code CdcIterators$CdcFileSplitsIterator} or {@code CdcIterators$BaseImageIterator}.
-   */
-  private static boolean containsCdcIteratorTeardownFrame(Throwable t) {
-    for (StackTraceElement frame : t.getStackTrace()) {
-      String className = frame.getClassName();
-      if (className.equals(CdcIterators.CdcFileSplitsIterator.class.getName())
-          || className.equals(CdcIterators.BaseImageIterator.class.getName())) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
    * Whether {@code e} (or any of its causes) is the normal {@link CollectSinkTableFactory.SuccessException}
    * terminator (the happy path), as opposed to one of the tolerated teardown-race symptoms.
    */
@@ -4373,16 +4241,5 @@ public class ITTestHoodieDataSource {
       }
     }
     return false;
-  }
-
-  /**
-   * Short description of {@code e}'s root cause, for logging which tolerated terminal failure fired.
-   */
-  private static String describeTerminalCause(Throwable e) {
-    Throwable root = e;
-    while (root.getCause() != null) {
-      root = root.getCause();
-    }
-    return root.getClass().getSimpleName() + ": " + root.getMessage();
   }
 }

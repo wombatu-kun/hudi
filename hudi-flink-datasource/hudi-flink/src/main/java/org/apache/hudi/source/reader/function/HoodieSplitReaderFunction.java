@@ -29,16 +29,15 @@ import org.apache.hudi.common.util.ValidationUtils;
 import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.exception.HoodieIOException;
 import org.apache.hudi.source.ExpressionPredicates;
-import org.apache.hudi.source.reader.BatchRecords;
-import org.apache.hudi.source.reader.HoodieRecordWithPosition;
 import org.apache.hudi.source.split.HoodieSourceSplit;
 import org.apache.hudi.table.format.FormatUtils;
 import org.apache.hudi.table.format.InternalSchemaManager;
+import org.apache.hudi.util.HoodieSchemaConverter;
 import org.apache.hudi.util.StreamerUtil;
 
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.connector.base.source.reader.RecordsWithSplitIds;
 import org.apache.flink.table.data.RowData;
+import org.apache.flink.table.types.logical.RowType;
 
 import java.io.IOException;
 import java.util.Collections;
@@ -52,7 +51,6 @@ public class HoodieSplitReaderFunction extends AbstractSplitReaderFunction {
   private final HoodieSchema tableSchema;
   private final HoodieSchema requiredSchema;
   private final String mergeType;
-  private transient HoodieFileGroupReader<RowData> fileGroupReader;
 
   public HoodieSplitReaderFunction(
       Configuration configuration,
@@ -72,26 +70,20 @@ public class HoodieSplitReaderFunction extends AbstractSplitReaderFunction {
   }
 
   @Override
-  public RecordsWithSplitIds<HoodieRecordWithPosition<RowData>> read(HoodieSourceSplit split) {
-    final String splitId = split.splitId();
+  protected ClosableIterator<RowData> createRecordIterator(HoodieSourceSplit split) {
     HoodieTableMetaClient metaClient = StreamerUtil.metaClientForReader(conf, getHadoopConf());
-
     try {
-      this.fileGroupReader = createFileGroupReader(split, metaClient);
-      final ClosableIterator<RowData> recordIterator = fileGroupReader.getClosableIterator();
-      BatchRecords<RowData> records = BatchRecords.forRecords(splitId, recordIterator, split.getFileOffset(), split.getConsumed());
-      records.seek(split.getConsumed());
-      return records;
+      // Closing the returned iterator cascade-closes the whole HoodieFileGroupReader, so the base
+      // class only has to close the iterator in closeCurrentSplit().
+      return createFileGroupReader(split, metaClient).getClosableIterator();
     } catch (IOException e) {
       throw new HoodieIOException("Failed to read from file group: " + split.getFileId(), e);
     }
   }
 
   @Override
-  public void close() throws Exception {
-    if (fileGroupReader != null) {
-      fileGroupReader.close();
-    }
+  protected RowType producedRowType() {
+    return HoodieSchemaConverter.convertToRowType(requiredSchema);
   }
 
   /**
