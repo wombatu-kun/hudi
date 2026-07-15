@@ -43,10 +43,13 @@ echo "Checking for binary files in the source files"
 mimeTypes=$(find . -type f -print0 | xargs -0 file --mime)
 
 # An empty file reports as inode/x-empty; charset=binary, and is neither binary nor
-# a licensing concern. release/ holds the release guide's screenshot; src/test/ holds
-# the binary fixtures (parquet, avro, hfile) that tests read.
-binaryFiles=$(echo "$mimeTypes" | grep -a 'charset=binary' | grep -v 'inode/x-empty' \
-  | grep -v 'release/' | grep -v '/src/test/' || true)
+# a licensing concern. The top-level release/ holds the release guide's screenshot;
+# src/test/ holds the binary fixtures (parquet, avro, hfile) that tests read. Every
+# stage carries -a so a non-UTF-8 filename can never flip a grep into binary mode and
+# drop a line. release/ is anchored to the top-level dir; src/test/ stays a substring
+# because those fixtures live under every module's src/test/.
+binaryFiles=$(echo "$mimeTypes" | grep -a 'charset=binary' | grep -av 'inode/x-empty' \
+  | grep -av '^\./release/' | grep -av '/src/test/' || true)
 
 if [ -n "$binaryFiles" ]; then
   echo -e "There were non-text files in source release. [ERROR]\n Please check below\n"
