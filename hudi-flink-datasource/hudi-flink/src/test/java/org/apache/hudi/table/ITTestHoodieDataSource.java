@@ -4354,8 +4354,8 @@ public class ITTestHoodieDataSource {
   private static boolean containsCdcIteratorTeardownFrame(Throwable t) {
     for (StackTraceElement frame : t.getStackTrace()) {
       String className = frame.getClassName();
-      if (className.contains(CdcIterators.CdcFileSplitsIterator.class.getName())
-          || className.contains(CdcIterators.BaseImageIterator.class.getName())) {
+      if (className.equals(CdcIterators.CdcFileSplitsIterator.class.getName())
+          || className.equals(CdcIterators.BaseImageIterator.class.getName())) {
         return true;
       }
     }
