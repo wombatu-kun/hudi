@@ -23,6 +23,7 @@ import org.apache.hudi.common.util.collection.ClosableIterator;
 import org.apache.hudi.config.HoodieWriteConfig;
 import org.apache.hudi.source.ExpressionPredicates;
 import org.apache.hudi.source.reader.BatchRecords;
+import org.apache.hudi.source.reader.HoodieRecordWithPosition;
 import org.apache.hudi.source.split.HoodieSourceSplit;
 import org.apache.hudi.table.format.InternalSchemaManager;
 import org.apache.hudi.utils.TestConfigurations;
@@ -44,6 +45,7 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.File;
 import java.util.Collections;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -265,7 +267,7 @@ public class TestAbstractSplitReaderFunction {
     HoodieSourceSplit split = createSplit();
 
     fn.open(split);
-    BatchRecords<RowData> batch = fn.readBatch(split, 10);
+    BatchRecords<RowData> batch = fn.readBatch(split, 10, () -> false);
     assertNotNull(batch);
     batch.nextSplit();
 
@@ -284,6 +286,54 @@ public class TestAbstractSplitReaderFunction {
     assertEquals(RowKind.DELETE, r0.getRowKind());
     assertEquals(RowKind.INSERT, r1.getRowKind());
     assertEquals(RowKind.DELETE, r2.getRowKind());
+  }
+
+  // -----------------------------------------------------------------------
+  //  readBatch — wake-up signal (cooperative cancellation between records)
+  // -----------------------------------------------------------------------
+
+  @Test
+  public void testReadBatchStopsOnWakeupSignal() {
+    // The wakeupSignal is polled between records; once it trips, materialization stops early and the
+    // records buffered so far are returned as a partial minibatch with continuous offsets.
+    ReusedObjectSplitReaderFunction fn =
+        new ReusedObjectSplitReaderFunction(conf, mockInternalSchemaManager, 5);
+    HoodieSourceSplit split = createSplit();
+    fn.open(split);
+
+    // Returns false, false, true: the loop buffers 2 records, then the 3rd poll stops it.
+    int[] polls = {0};
+    BooleanSupplier signal = () -> (++polls[0]) > 2;
+
+    BatchRecords<RowData> batch = fn.readBatch(split, 10, signal);
+    assertNotNull(batch);
+    batch.nextSplit();
+
+    // nextRecordFromSplit() returns the same reused position wrapper each call, so read each record's
+    // value/offset before advancing. Offsets are 1-based and continuous from the starting offset (0).
+    HoodieRecordWithPosition<RowData> rec = batch.nextRecordFromSplit();
+    assertNotNull(rec);
+    assertEquals(0, rec.record().getInt(0));
+    assertEquals(1L, rec.recordOffset());
+
+    rec = batch.nextRecordFromSplit();
+    assertNotNull(rec);
+    assertEquals(1, rec.record().getInt(0));
+    assertEquals(2L, rec.recordOffset());
+
+    assertNull(batch.nextRecordFromSplit(), "materialization must stop at 2 records on wake-up");
+  }
+
+  @Test
+  public void testReadBatchReturnsNullWhenWokenBeforeAnyRecord() {
+    // A wake-up that lands before the first record is buffered yields an empty batch, signalled as
+    // null (the same sentinel as EOF); HoodieSourceSplitReader.fetch() disambiguates the two.
+    ReusedObjectSplitReaderFunction fn =
+        new ReusedObjectSplitReaderFunction(conf, mockInternalSchemaManager, 5);
+    HoodieSourceSplit split = createSplit();
+    fn.open(split);
+
+    assertNull(fn.readBatch(split, 10, () -> true));
   }
 
   private HoodieSourceSplit createSplit() {

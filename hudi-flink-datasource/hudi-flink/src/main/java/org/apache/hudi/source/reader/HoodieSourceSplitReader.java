@@ -67,6 +67,9 @@ public class HoodieSourceSplitReader<T> implements SplitReader<HoodieRecordWithP
   private final SplitReaderFunction<T> readerFunction;
   private final Option<RecordLimiter> recordLimiter;
   private transient HoodieSourceSplit currentSplit;
+  // Set by wakeUp() (possibly from another thread) to stop the in-flight minibatch drain promptly.
+  // Reset at the start of every fetch(), so it only ever means "a wakeUp() landed during THIS fetch".
+  private volatile boolean wokenUp;
 
   public HoodieSourceSplitReader(
       String tableName,
@@ -84,6 +87,11 @@ public class HoodieSourceSplitReader<T> implements SplitReader<HoodieRecordWithP
 
   @Override
   public RecordsWithSplitIds<HoodieRecordWithPosition<T>> fetch() throws IOException {
+    // A wakeUp() only needs to unblock an in-progress fetch(); Flink's SplitFetcher drives shutdown
+    // off its own 'closed' flag (set before wakeUp() and checked before the next fetch()), not off a
+    // lasting wakeUp effect. Start each cycle from a clean flag so the drain below reacts only to a
+    // wakeUp that lands during THIS fetch.
+    wokenUp = false;
     if (currentSplit == null) {
       // Limit already satisfied: drain any remaining locally-queued splits as immediately finished
       // so that Flink's SourceReaderBase can reach end-of-input cleanly.
@@ -102,9 +110,17 @@ public class HoodieSourceSplitReader<T> implements SplitReader<HoodieRecordWithP
 
     // Read the next bounded minibatch of the open split, unless the global limit is already reached.
     if (!recordLimiter.map(RecordLimiter::isLimitReached).orElse(false)) {
-      BatchRecords<T> batch = readerFunction.readBatch(currentSplit, DEFAULT_MINI_BATCH_SIZE);
+      BatchRecords<T> batch = readerFunction.readBatch(currentSplit, DEFAULT_MINI_BATCH_SIZE, () -> wokenUp);
       if (batch != null) {
+        // Partial (woken) or full minibatch; the split is not finished either way.
         return recordLimiter.map(rl -> rl.wrap(batch)).orElse(batch);
+      }
+      if (wokenUp) {
+        // Woken before any record was buffered: return promptly WITHOUT finishing or closing the
+        // split, so it resumes on the next fetch(), or the fetcher observes shutdown and closes it
+        // on this (split-fetcher) thread. This branch must stay inside the !isLimitReached block:
+        // a wakeUp coinciding with the limit-reached path below must still finish the split.
+        return new RecordsBySplits<>(Collections.emptyMap(), Collections.emptySet());
       }
     }
 
@@ -134,13 +150,17 @@ public class HoodieSourceSplitReader<T> implements SplitReader<HoodieRecordWithP
 
   @Override
   public void wakeUp() {
-    // Nothing to do
+    // Flink calls this (while holding SplitFetcher.lock) to unblock a fetch() that is draining a
+    // minibatch, e.g. on shutdown. Keep it a non-blocking plain volatile write; the drain loop in
+    // readBatch polls the flag between records and returns promptly. The actual resource teardown
+    // still happens on the split-fetcher thread via close()/closeCurrentSplit().
+    wokenUp = true;
   }
 
   /**
    * SourceSplitReader only reads splits sequentially. When waiting for watermark alignment
    * the SourceOperator will stop processing and recycling the fetched batches. Based on this the
-   * {@code pauseOrResumeSplits} and the {@code wakeUp} are left empty.
+   * {@code pauseOrResumeSplits} is left empty.
    * @param splitsToPause splits to pause
    * @param splitsToResume splits to resume
    */

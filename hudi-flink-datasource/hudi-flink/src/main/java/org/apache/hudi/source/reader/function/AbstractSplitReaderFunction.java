@@ -35,6 +35,7 @@ import org.apache.flink.table.types.logical.RowType;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.BooleanSupplier;
 
 /**
  * Abstract implementation of {@link SplitReaderFunction} that provides the per-split cursor
@@ -43,7 +44,7 @@ import java.util.List;
  * <p>A subclass only supplies how to create the record iterator for a split
  * ({@link #createRecordIterator(HoodieSourceSplit)}) and the {@link RowType} of the records it
  * produces ({@link #producedRowType()}); this base drives {@link #open(HoodieSourceSplit)},
- * {@link #readBatch(HoodieSourceSplit, int)}, {@link #closeCurrentSplit()} and {@link #close()},
+ * {@link #readBatch(HoodieSourceSplit, int, java.util.function.BooleanSupplier)}, {@link #closeCurrentSplit()} and {@link #close()},
  * all on the single split-fetcher thread.
  *
  * <p>Because Flink's columnar readers (and the CDC/MOR row projections) return the same reused
@@ -110,13 +111,15 @@ public abstract class AbstractSplitReaderFunction implements SplitReaderFunction
   }
 
   @Override
-  public BatchRecords<RowData> readBatch(HoodieSourceSplit split, int batchSize) {
+  public BatchRecords<RowData> readBatch(HoodieSourceSplit split, int batchSize, BooleanSupplier wakeupSignal) {
     ValidationUtils.checkState(currentIterator != null,
         "readBatch called before open for split " + split.splitId());
     RowDataSerializer serializer = getCopySerializer();
     List<RowData> buffer = new ArrayList<>();
     try {
-      while (buffer.size() < batchSize && currentIterator.hasNext()) {
+      // Poll wakeupSignal between records so a wakeUp() lands promptly: materialization stops early
+      // and whatever is buffered so far is returned as a partial minibatch (null if nothing yet).
+      while (buffer.size() < batchSize && !wakeupSignal.getAsBoolean() && currentIterator.hasNext()) {
         RowData next = currentIterator.next();
         buffer.add(serializer.copy(next));
       }

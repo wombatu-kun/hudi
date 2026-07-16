@@ -38,6 +38,9 @@ import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -185,13 +188,235 @@ public class TestHoodieSourceSplitReader {
   }
 
   @Test
-  public void testWakeUp() {
+  public void testWakeUp() throws IOException {
     TestSplitReaderFunction readerFunction = new TestSplitReaderFunction();
     HoodieSourceSplitReader<String> reader =
         new HoodieSourceSplitReader<>(TABLE_NAME, readerContext, readerFunction, null, Option.empty());
 
-    // wakeUp is a no-op, should not throw any exception
+    // wakeUp() now sets a flag but must not throw, and the flag is reset at the top of each fetch()
+    // so a wakeUp with no in-flight drain leaves the next fetch() unaffected.
     reader.wakeUp();
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> result = reader.fetch();
+    assertNotNull(result);
+    assertNull(result.nextSplit());
+  }
+
+  // -------------------------------------------------------------------------
+  //  wakeUp — cooperative cancellation of the minibatch drain
+  // -------------------------------------------------------------------------
+
+  @Test
+  public void testWakeUpMidDrainReturnsPartialBatchAndResumes() throws IOException {
+    // A wakeUp() landing after the first record stops the drain between records: fetch() returns the
+    // 1 record buffered so far as a NON-finishing batch without closing the split; a later fetch()
+    // resumes the rest with continuous offsets, and the split is closed only once at true EOF.
+    List<String> testData = Arrays.asList("r1", "r2", "r3", "r4", "r5");
+    TestSplitReaderFunction readerFunction = new TestSplitReaderFunction(testData);
+    HoodieSourceSplitReader<String> reader =
+        new HoodieSourceSplitReader<>(TABLE_NAME, readerContext, readerFunction, null, Option.empty());
+    boolean[] fired = {false};
+    readerFunction.setDrainProbe((buffered, hasNext) -> {
+      if (buffered == 1 && !fired[0]) {
+        fired[0] = true;
+        reader.wakeUp();
+      }
+    });
+
+    HoodieSourceSplit split = createTestSplit(1, "file1");
+    reader.handleSplitsChanges(new SplitsAddition<>(Collections.singletonList(split)));
+
+    // First fetch: woken after r1 -> partial batch of 1, split not finished, not closed.
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b1 = reader.fetch();
+    assertEquals(split.splitId(), b1.nextSplit());
+    HoodieRecordWithPosition<String> first = b1.nextRecordFromSplit();
+    assertNotNull(first);
+    assertEquals("r1", first.record());
+    assertEquals(1L, first.recordOffset());
+    assertNull(b1.nextRecordFromSplit(), "drain must stop at the first record on wake-up");
+    assertTrue(b1.finishedSplits().isEmpty(), "woken split must not be finished");
+    assertEquals(0, readerFunction.getCloseCurrentSplitCount(), "woken split must not be closed");
+
+    // Second fetch: resumes the remaining records with continuous offsets (2..5).
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b2 = reader.fetch();
+    assertEquals(split.splitId(), b2.nextSplit());
+    HoodieRecordWithPosition<String> next = b2.nextRecordFromSplit();
+    assertNotNull(next);
+    assertEquals("r2", next.record());
+    assertEquals(2L, next.recordOffset(), "offset continues across the wake boundary");
+    assertEquals(3, drainRecordCount(b2), "r3, r4, r5 remain");
+    assertTrue(b2.finishedSplits().isEmpty());
+
+    // Third fetch: true EOF -> finish signal, split closed exactly once, opened exactly once.
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b3 = reader.fetch();
+    assertTrue(b3.finishedSplits().contains(split.splitId()));
+    assertEquals(1, readerFunction.getCloseCurrentSplitCount());
+    assertEquals(1, readerFunction.getOpenCount());
+  }
+
+  @Test
+  public void testWakeUpBeforeAnyRecordReturnsEmptyNonFinishingBatch() throws IOException {
+    // A wakeUp() landing before any record is buffered must return an empty NON-finishing batch, not
+    // a finish signal: the split stays open (not closed) and resumes on the next fetch().
+    List<String> testData = Arrays.asList("r1", "r2", "r3");
+    TestSplitReaderFunction readerFunction = new TestSplitReaderFunction(testData);
+    HoodieSourceSplitReader<String> reader =
+        new HoodieSourceSplitReader<>(TABLE_NAME, readerContext, readerFunction, null, Option.empty());
+    boolean[] fired = {false};
+    readerFunction.setDrainProbe((buffered, hasNext) -> {
+      // Wake at the start of the drain (count 0) while data is still available.
+      if (buffered == 0 && hasNext && !fired[0]) {
+        fired[0] = true;
+        reader.wakeUp();
+      }
+    });
+
+    HoodieSourceSplit split = createTestSplit(1, "file1");
+    reader.handleSplitsChanges(new SplitsAddition<>(Collections.singletonList(split)));
+
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b1 = reader.fetch();
+    assertNull(b1.nextSplit(), "empty non-finishing batch carries no split records");
+    assertTrue(b1.finishedSplits().isEmpty(), "must not finish the split on wake-up");
+    assertEquals(0, readerFunction.getCloseCurrentSplitCount(), "split must stay open");
+
+    // Next fetch resumes and returns all records (the one-shot wake has fired).
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b2 = reader.fetch();
+    assertEquals(split.splitId(), b2.nextSplit());
+    assertEquals(3, drainRecordCount(b2));
+  }
+
+  @Test
+  public void testWakeUpCoincidingWithEofDefersFinishByOneFetch() throws IOException {
+    // readBatch returning null is ambiguous between true-EOF and woken-empty. When a wakeUp lands
+    // exactly at genuine exhaustion, fetch() returns an empty non-finishing batch once (deferring the
+    // finish), and the next fetch() finishes the split - it must never stall.
+    List<String> testData = Arrays.asList("r1", "r2");
+    TestSplitReaderFunction readerFunction = new TestSplitReaderFunction(testData);
+    HoodieSourceSplitReader<String> reader =
+        new HoodieSourceSplitReader<>(TABLE_NAME, readerContext, readerFunction, null, Option.empty());
+    boolean[] fired = {false};
+    readerFunction.setDrainProbe((buffered, hasNext) -> {
+      // Wake only at the start of a drain that finds the cursor already exhausted.
+      if (buffered == 0 && !hasNext && !fired[0]) {
+        fired[0] = true;
+        reader.wakeUp();
+      }
+    });
+
+    HoodieSourceSplit split = createTestSplit(1, "file1");
+    reader.handleSplitsChanges(new SplitsAddition<>(Collections.singletonList(split)));
+
+    // First fetch drains both records (cursor still had data at drain start, so no wake).
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b1 = reader.fetch();
+    assertEquals(2, drainRecordCount(b1));
+    assertEquals(0, readerFunction.getCloseCurrentSplitCount());
+
+    // Second fetch: cursor is exhausted at drain start -> wake fires -> empty non-finishing, deferred.
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b2 = reader.fetch();
+    assertTrue(b2.finishedSplits().isEmpty(), "finish deferred by the coinciding wake-up");
+    assertEquals(0, readerFunction.getCloseCurrentSplitCount());
+
+    // Third fetch: no wake now -> true EOF finishes and closes the split.
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b3 = reader.fetch();
+    assertTrue(b3.finishedSplits().contains(split.splitId()));
+    assertEquals(1, readerFunction.getCloseCurrentSplitCount());
+  }
+
+  @Test
+  public void testWakeUpWithLimitReachedStillFinishesSplit() throws IOException {
+    // Guard: the woken-resume short-circuit must live strictly on the readBatch-returned-null path.
+    // A wakeUp coinciding with the limit-reached path must still finish the split, never loop forever
+    // returning non-finishing batches. The limiter wakes the reader exactly when the limit is reached.
+    List<String> testData = Arrays.asList("r1", "r2", "r3");
+    TestSplitReaderFunction readerFunction = new TestSplitReaderFunction(testData);
+    AtomicReference<HoodieSourceSplitReader<String>> holder = new AtomicReference<>();
+    RecordLimiter wakingLimiter = new RecordLimiter(2L) {
+      @Override
+      public boolean isLimitReached() {
+        boolean reached = super.isLimitReached();
+        if (reached && holder.get() != null) {
+          holder.get().wakeUp();
+        }
+        return reached;
+      }
+    };
+    HoodieSourceSplitReader<String> reader =
+        new HoodieSourceSplitReader<>(TABLE_NAME, readerContext, readerFunction, null, Option.of(wakingLimiter));
+    holder.set(reader);
+
+    HoodieSourceSplit split = createTestSplit(1, "file1");
+    reader.handleSplitsChanges(new SplitsAddition<>(Collections.singletonList(split)));
+
+    // First fetch returns the split data; the limit wrapper caps consumption at 2 records.
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b1 = reader.fetch();
+    assertEquals(split.splitId(), b1.nextSplit());
+    assertEquals(2, drainRecordCount(b1), "limit caps drained records at 2");
+
+    // Second fetch hits the limit-reached path (which wakes the reader); it must finish, not defer.
+    RecordsWithSplitIds<HoodieRecordWithPosition<String>> b2 = reader.fetch();
+    assertTrue(b2.finishedSplits().contains(split.splitId()), "limit-reached path must finish the split");
+    assertEquals(1, readerFunction.getCloseCurrentSplitCount());
+  }
+
+  @Test
+  public void testWakeUpPartialBatchRespectsLimit() throws IOException {
+    // A partial (woken) batch must not double-count against the pushed-down limit: with limit=3 over a
+    // 5-record split and a wake after the first record, the total emitted across batches stays at 3.
+    List<String> testData = Arrays.asList("r1", "r2", "r3", "r4", "r5");
+    TestSplitReaderFunction readerFunction = new TestSplitReaderFunction(testData);
+    HoodieSourceSplitReader<String> reader =
+        new HoodieSourceSplitReader<>(TABLE_NAME, readerContext, readerFunction, null, Option.of(new RecordLimiter(3L)));
+    boolean[] fired = {false};
+    readerFunction.setDrainProbe((buffered, hasNext) -> {
+      if (buffered == 1 && !fired[0]) {
+        fired[0] = true;
+        reader.wakeUp();
+      }
+    });
+
+    HoodieSourceSplit split = createTestSplit(1, "file1");
+    reader.handleSplitsChanges(new SplitsAddition<>(Collections.singletonList(split)));
+
+    int total = 0;
+    // Drain fetches until the split is finished; assert the limit caps the total at 3.
+    for (int i = 0; i < 10; i++) {
+      RecordsWithSplitIds<HoodieRecordWithPosition<String>> batch = reader.fetch();
+      if (batch.nextSplit() != null) {
+        total += drainRecordCount(batch);
+      }
+      if (batch.finishedSplits().contains(split.splitId())) {
+        break;
+      }
+    }
+    assertEquals(3, total, "pushed-down limit must cap the total across partial woken batches");
+  }
+
+  @Test
+  public void testCloseReleasesWokenStillOpenSplit() throws Exception {
+    // Unit proxy for the real shutdown path (SplitFetcher.run() -> splitReader.close() on the fetcher
+    // thread): a split left open by a wake-up is released when the reader is closed.
+    List<String> testData = Arrays.asList("r1", "r2", "r3");
+    TestSplitReaderFunction readerFunction = new TestSplitReaderFunction(testData);
+    HoodieSourceSplitReader<String> reader =
+        new HoodieSourceSplitReader<>(TABLE_NAME, readerContext, readerFunction, null, Option.empty());
+    boolean[] fired = {false};
+    readerFunction.setDrainProbe((buffered, hasNext) -> {
+      if (buffered == 1 && !fired[0]) {
+        fired[0] = true;
+        reader.wakeUp();
+      }
+    });
+
+    HoodieSourceSplit split = createTestSplit(1, "file1");
+    reader.handleSplitsChanges(new SplitsAddition<>(Collections.singletonList(split)));
+
+    // Woken fetch leaves the split open (not closed).
+    reader.fetch();
+    assertEquals(0, readerFunction.getCloseCurrentSplitCount());
+
+    // close() on the (split-fetcher) thread releases the still-open split.
+    reader.close();
+    assertEquals(1, readerFunction.getCloseCurrentSplitCount());
+    assertTrue(readerFunction.isClosed());
   }
 
   @Test
@@ -584,6 +809,14 @@ public class TestHoodieSourceSplitReader {
     private Iterator<String> cursor;
     private long nextRecordOffset;
 
+    // Optional hook invoked as (bufferedCount, cursorHasNext) at readBatch start (count 0) and after
+    // each buffered record, so a test can call reader.wakeUp() at a precise point in the drain.
+    private BiConsumer<Integer, Boolean> drainProbe;
+
+    void setDrainProbe(BiConsumer<Integer, Boolean> drainProbe) {
+      this.drainProbe = drainProbe;
+    }
+
     public TestSplitReaderFunction() {
       this(Collections.emptyList());
     }
@@ -610,10 +843,16 @@ public class TestHoodieSourceSplitReader {
     }
 
     @Override
-    public BatchRecords<String> readBatch(HoodieSourceSplit split, int batchSize) {
+    public BatchRecords<String> readBatch(HoodieSourceSplit split, int batchSize, BooleanSupplier wakeupSignal) {
       List<String> buffer = new ArrayList<>();
-      while (buffer.size() < batchSize && cursor.hasNext()) {
+      if (drainProbe != null) {
+        drainProbe.accept(0, cursor.hasNext());
+      }
+      while (buffer.size() < batchSize && !wakeupSignal.getAsBoolean() && cursor.hasNext()) {
         buffer.add(cursor.next());
+        if (drainProbe != null) {
+          drainProbe.accept(buffer.size(), cursor.hasNext());
+        }
       }
       if (buffer.isEmpty()) {
         return null;
@@ -631,6 +870,9 @@ public class TestHoodieSourceSplitReader {
 
     @Override
     public void close() {
+      // Mirror AbstractSplitReaderFunction#close(): releasing the reader also releases any split
+      // still open (e.g. one left open by a wake-up), on the split-fetcher thread.
+      closeCurrentSplit();
       closed = true;
     }
 

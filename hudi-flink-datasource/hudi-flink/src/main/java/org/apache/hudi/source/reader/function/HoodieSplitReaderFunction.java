@@ -72,12 +72,29 @@ public class HoodieSplitReaderFunction extends AbstractSplitReaderFunction {
   @Override
   protected ClosableIterator<RowData> createRecordIterator(HoodieSourceSplit split) {
     HoodieTableMetaClient metaClient = StreamerUtil.metaClientForReader(conf, getHadoopConf());
+    // Closing the returned iterator cascade-closes the whole HoodieFileGroupReader, so the base
+    // class only has to close the iterator in closeCurrentSplit(). But getClosableIterator() runs
+    // initRecordIterators(), which opens the reader's base-file iterator / record buffer before the
+    // wrapping iterator is returned; if it throws, the reader is only a local here and nothing else
+    // would close it. Keep it in a local and close it in the failure path.
+    HoodieFileGroupReader<RowData> fileGroupReader = createFileGroupReader(split, metaClient);
     try {
-      // Closing the returned iterator cascade-closes the whole HoodieFileGroupReader, so the base
-      // class only has to close the iterator in closeCurrentSplit().
-      return createFileGroupReader(split, metaClient).getClosableIterator();
+      return fileGroupReader.getClosableIterator();
     } catch (IOException e) {
+      closeSuppressing(fileGroupReader, e);
       throw new HoodieIOException("Failed to read from file group: " + split.getFileId(), e);
+    } catch (RuntimeException | Error e) {
+      closeSuppressing(fileGroupReader, e);
+      throw e;
+    }
+  }
+
+  /** Closes {@code reader}, attaching any close failure to {@code primary} as a suppressed exception. */
+  private static void closeSuppressing(HoodieFileGroupReader<RowData> reader, Throwable primary) {
+    try {
+      reader.close();
+    } catch (Exception closeError) {
+      primary.addSuppressed(closeError);
     }
   }
 
@@ -93,7 +110,7 @@ public class HoodieSplitReaderFunction extends AbstractSplitReaderFunction {
    * @param metaClient The table meta client for schema and config resolution
    * @return A {@link HoodieFileGroupReader} instance
    */
-  private HoodieFileGroupReader<RowData> createFileGroupReader(HoodieSourceSplit split, HoodieTableMetaClient metaClient) {
+  protected HoodieFileGroupReader<RowData> createFileGroupReader(HoodieSourceSplit split, HoodieTableMetaClient metaClient) {
     // Create FileSlice from split information
     FileSlice fileSlice = new FileSlice(
         new HoodieFileGroupId(split.getPartitionPath(), split.getFileId()),
