@@ -49,8 +49,8 @@ import java.util.List;
  * <p>Because Flink's columnar readers (and the CDC/MOR row projections) return the same reused
  * {@link RowData} object on every {@code next()}, {@link #readBatch} copies each record before
  * buffering it - materializing raw references would make every entry in a minibatch alias the last
- * row. The {@link RowKind} is re-applied after the copy because the serializer does not round-trip
- * it (see {@code CdcImageManager#getImageRecord}).
+ * row. {@link RowDataSerializer#copy(RowData)} preserves the record's {@code RowKind}, so no
+ * re-apply is needed.
  */
 public abstract class AbstractSplitReaderFunction implements SplitReaderFunction<RowData> {
 
@@ -118,9 +118,7 @@ public abstract class AbstractSplitReaderFunction implements SplitReaderFunction
     try {
       while (buffer.size() < batchSize && currentIterator.hasNext()) {
         RowData next = currentIterator.next();
-        RowData copy = serializer.copy(next);
-        copy.setRowKind(next.getRowKind());
-        buffer.add(copy);
+        buffer.add(serializer.copy(next));
       }
     } catch (RuntimeException | Error e) {
       // Close on failure so the split's I/O resources are released even if a mid-drain read fails.
