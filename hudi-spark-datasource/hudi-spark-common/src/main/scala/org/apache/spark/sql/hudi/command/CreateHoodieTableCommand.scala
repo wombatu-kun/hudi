@@ -155,7 +155,7 @@ object CreateHoodieTableCommand {
     val newTable = table.copy(
       identifier = newTableIdentifier,
       storage = newStorage,
-      schema = hoodieCatalogTable.tableSchema,
+      schema = restoreColumnDefaultMetadata(hoodieCatalogTable),
       provider = Some("hudi"),
       partitionColumnNames = partitionColumnNames,
       createVersion = SPARK_VERSION,
@@ -168,6 +168,31 @@ object CreateHoodieTableCommand {
       createHiveDataSourceTable(sparkSession, newTable)
     } else {
       catalog.createTable(newTable, ignoreIfExists = false, validateLocation = false)
+    }
+  }
+
+  /**
+   * The schema Hudi persists to the session catalog is reconstructed from the table's Avro schema,
+   * which drops the Spark column metadata carrying the declared column DEFAULT values (the
+   * `CURRENT_DEFAULT` key written for `col <type> DEFAULT <expr>`). Restore that metadata onto the
+   * matching fields from the original catalog schema so the persisted schema keeps the defaults,
+   * which the Spark 4 insert path relies on to back-fill omitted columns. Scoped to Spark 4 to keep
+   * the persisted schema unchanged on Spark 3.x, where the insert path does not consume it.
+   */
+  private def restoreColumnDefaultMetadata(hoodieCatalogTable: HoodieCatalogTable): StructType = {
+    // Literal value of ResolveDefaultColumns.CURRENT_DEFAULT_COLUMN_METADATA_KEY (kept as a literal so
+    // this shared module still compiles against Spark versions that predate that constant).
+    val currentDefaultKey = "CURRENT_DEFAULT"
+    if (!SPARK_VERSION.startsWith("4.")) {
+      hoodieCatalogTable.tableSchema
+    } else {
+      val originalFields = hoodieCatalogTable.table.schema.map(f => f.name -> f).toMap
+      StructType(hoodieCatalogTable.tableSchema.map { field =>
+        originalFields.get(field.name)
+          .filter(_.metadata.contains(currentDefaultKey))
+          .map(orig => field.copy(metadata = orig.metadata))
+          .getOrElse(field)
+      })
     }
   }
 

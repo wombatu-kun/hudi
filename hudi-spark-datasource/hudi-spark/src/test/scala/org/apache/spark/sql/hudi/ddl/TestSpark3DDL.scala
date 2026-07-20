@@ -1031,40 +1031,42 @@ class TestSpark3DDL extends HoodieSparkSqlTestBase {
         val tableName = generateTableName
         val tablePath = s"${new Path(tmp.getCanonicalPath, tableName).toUri.toString}"
         spark.sql("set spark.sql.defaultColumn.allowedProviders=csv,json,orc,parquet,hudi")
-        if (HoodieSparkUtils.gteqSpark3_1) {
-          spark.sql("set hoodie.schema.evolution.enable=true")
-          System.clearProperty("spark.testing")
-          spark.sql(
-            s"""
-               |create table $tableName (
-               |  id int,
-               |  comb int,
-               |  col0 int default 0,
-               |  col1 bigint default 10000,
-               |  col2 float default 100.001,
-               |  col3 double default 10000.00001,
-               |  col4 decimal(10,4) default 100000.0001,
-               |  col5 string default 'DEFAULT',
-               |  col6 date default '2000-01-01',
-               |  col7 timestamp default TIMESTAMP '2000-02-20 12:22:21',
-               |  col8 boolean default false
-               |) using hudi
-               | location '$tablePath'
-               | options (
-               |  type = '$tableType',
-               |  primaryKey = 'id',
-               |  preCombineField = 'comb'
-               | )
-             """.stripMargin)
+        spark.sql("set hoodie.schema.evolution.enable=true")
+        System.clearProperty("spark.testing")
+        spark.sql(
+          s"""
+             |create table $tableName (
+             |  id int,
+             |  comb int,
+             |  col0 int default 0,
+             |  col1 bigint default 10000,
+             |  col2 float default 100.001,
+             |  col3 double default 10000.00001,
+             |  col4 decimal(10,4) default 100000.0001,
+             |  col5 string default 'DEFAULT',
+             |  col6 date default '2000-01-01',
+             |  col7 timestamp default TIMESTAMP '2000-02-20 12:22:21',
+             |  col8 boolean default false
+             |) using hudi
+             | location '$tablePath'
+             | options (
+             |  type = '$tableType',
+             |  primaryKey = 'id',
+             |  preCombineField = 'comb'
+             | )
+           """.stripMargin)
 
-          spark.sql(s"insert into ${tableName}(id,comb) values(1,1),(2,2)")
-          spark.sql(s"insert into ${tableName}(id,comb) select 1,111")
-          spark.sql(s"insert into ${tableName}(id,comb,col0,col8) values (3,333,8,true)")
-          spark.sql(s"select id,comb,col0,col1,col2,col3,col4,col5,col6,col7,col8 from $tableName").show(false)
-          checkAnswer(spark.sql(s"select id,comb,cast(col7 as string) from $tableName order by id").collect())(
-            Seq(1, 111, "2000-02-20 12:22:21"), Seq(2, 2, "2000-02-20 12:22:21"), Seq(3, 333, "2000-02-20 12:22:21")
-          )
-        }
+        spark.sql(s"insert into ${tableName}(id,comb) values(1,1),(2,2)")
+        spark.sql(s"insert into ${tableName}(id,comb) select 1,111")
+        spark.sql(s"insert into ${tableName}(id,comb,col0,col8) values (3,333,8,true)")
+        checkAnswer(spark.sql(
+          s"""select id, comb, col0, col1, col2, col3, cast(col4 as string), col5,
+             |  cast(col6 as string), cast(col7 as string), col8
+             |  from $tableName order by id""".stripMargin).collect())(
+          Seq(1, 111, 0, 10000L, 100.001f, 10000.00001, "100000.0001", "DEFAULT", "2000-01-01", "2000-02-20 12:22:21", false),
+          Seq(2, 2, 0, 10000L, 100.001f, 10000.00001, "100000.0001", "DEFAULT", "2000-01-01", "2000-02-20 12:22:21", false),
+          Seq(3, 333, 8, 10000L, 100.001f, 10000.00001, "100000.0001", "DEFAULT", "2000-01-01", "2000-02-20 12:22:21", true)
+        )
       }
     }
   }

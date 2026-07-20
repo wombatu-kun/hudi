@@ -17,10 +17,14 @@
 
 package org.apache.spark.sql.hudi.analysis
 
-import org.apache.hudi.DefaultSource
+import org.apache.hudi.{DefaultSource, SparkAdapterSupport}
+import org.apache.hudi.common.model.HoodieRecord
 
+import org.apache.spark.sql.catalyst.catalog.CatalogTable
+import org.apache.spark.sql.catalyst.expressions.{Alias, NamedExpression}
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.rules.Rule
+import org.apache.spark.sql.catalyst.util.ResolveDefaultColumns
 import org.apache.spark.sql.execution.datasources.v2.DataSourceV2Relation
 import org.apache.spark.sql.execution.datasources.LogicalRelation
 import org.apache.spark.sql.hudi.ProvidesHoodieConfig
@@ -37,7 +41,7 @@ import org.apache.spark.sql.{SQLContext, SparkSession}
  * Check out HUDI-4178 for more details
  */
 case class HoodieSpark40DataSourceV2ToV1Fallback(sparkSession: SparkSession) extends Rule[LogicalPlan]
-  with ProvidesHoodieConfig {
+  with ProvidesHoodieConfig with SparkAdapterSupport {
 
   override def apply(plan: LogicalPlan): LogicalPlan = plan match {
     // The only place we're avoiding fallback is in [[AlterTableCommand]]s since
@@ -46,13 +50,61 @@ case class HoodieSpark40DataSourceV2ToV1Fallback(sparkSession: SparkSession) ext
 
     // NOTE: Unfortunately, [[InsertIntoStatement]] is implemented in a way that doesn't expose
     //       target relation as a child (even though there's no good reason for that)
+    //
+    //       An INSERT carrying an explicit column list keeps its [[userSpecifiedCols]], whereas Hudi's
+    //       early [[ResolveImplementationsEarly]] conversion drops them -- which preempts Spark's own
+    //       column-DEFAULT resolution ([[ResolveInsertInto]]) and leaves omitted columns unfilled
+    //       (SPARK INSERT_COLUMN_ARITY_MISMATCH). We replicate that resolution before the column list is
+    //       dropped, expanding the query into a full-width projection padded with the declared DEFAULTs.
     case iis@InsertIntoStatement(rv2@DataSourceV2Relation(v2Table: HoodieInternalV2Table, _, _, _, _), _, _, _, _, _, _) =>
-      iis.copy(table = convertToV1(rv2, v2Table))
+      fillMissingColumnsWithDefaults(iis, v2Table.v1Table).copy(table = convertToV1(rv2, v2Table))
+
+    // Handles the case where the insert query only becomes resolved after this rule already ran the
+    // DSv2 -> DSv1 fallback above (so the target is now a [[LogicalRelation]] while the column list is
+    // still present). The same expansion still has to happen before the column list is dropped.
+    case iis@InsertIntoStatement(lr: LogicalRelation, _, _, _, _, _, _)
+        if iis.userSpecifiedCols.nonEmpty && iis.query.resolved =>
+      sparkAdapter.resolveHoodieTable(lr)
+        .map(fillMissingColumnsWithDefaults(iis, _))
+        .getOrElse(iis)
 
     case _ =>
       plan.resolveOperatorsDown {
         case rv2@DataSourceV2Relation(v2Table: HoodieInternalV2Table, _, _, _, _) => convertToV1(rv2, v2Table)
       }
+  }
+
+  /**
+   * Expands an INSERT with an explicit (partial) column list into a full-width projection over the
+   * table schema, mapping the user-provided columns by name and filling every omitted column with its
+   * declared DEFAULT value (or NULL literal for nullable columns without a default). The provided
+   * [[catalogTable]] schema carries the column DEFAULT metadata written at CREATE time.
+   */
+  private def fillMissingColumnsWithDefaults(iis: InsertIntoStatement,
+                                             catalogTable: CatalogTable): InsertIntoStatement = {
+    // Only rewrite explicit-column-list inserts into non-partitioned tables whose query is already
+    // resolved (otherwise there is no output to map the provided columns onto). All other inserts are
+    // left untouched.
+    if (iis.userSpecifiedCols.isEmpty || !iis.query.resolved ||
+      catalogTable.partitionColumnNames.nonEmpty ||
+      iis.userSpecifiedCols.length != iis.query.output.length) {
+      iis
+    } else {
+      val resolver = sparkSession.sessionState.conf.resolver
+      val provided = iis.userSpecifiedCols.zip(iis.query.output)
+      val dataColumns = catalogTable.schema.filterNot(f => HoodieRecord.HOODIE_META_COLUMNS.contains(f.name))
+      val projectList: Seq[NamedExpression] = dataColumns.map { field =>
+        provided.collectFirst {
+          case (name, attr) if resolver(name, field.name) => Alias(attr, field.name)()
+        }.getOrElse {
+          ResolveDefaultColumns.getDefaultValueExprOrNullLit(field) match {
+            case named: NamedExpression => named
+            case expr => Alias(expr, field.name)()
+          }
+        }
+      }
+      iis.copy(query = Project(projectList, iis.query), userSpecifiedCols = Nil)
+    }
   }
 
   private def convertToV1(rv2: DataSourceV2Relation, v2Table: HoodieInternalV2Table) = {
