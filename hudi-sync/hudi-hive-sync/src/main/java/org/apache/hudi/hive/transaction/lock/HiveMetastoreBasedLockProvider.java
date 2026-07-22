@@ -171,7 +171,7 @@ public class HiveMetastoreBasedLockProvider implements LockProvider<LockResponse
       log.error(generateLogStatement(org.apache.hudi.common.lock.LockState.FAILED_TO_RELEASE, generateLogSuffixString()), e);
     } finally {
       // Always release the heartbeat thread pool, even if unlock/closeCurrent above threw,
-      // otherwise the 2 scheduled threads leak for the lifetime of the JVM.
+      // otherwise its scheduled threads leak for the lifetime of the JVM.
       executor.shutdown();
     }
   }
