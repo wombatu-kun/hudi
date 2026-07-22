@@ -64,6 +64,7 @@ import java.util.stream.Collectors;
 import static org.apache.hudi.avro.AvroSchemaUtils.resolveNullableSchema;
 import static org.apache.hudi.avro.AvroSchemaUtils.resolveUnionSchema;
 import static org.apache.hudi.avro.HoodieAvroUtils.isMetadataField;
+import static org.apache.hudi.avro.HoodieAvroUtils.readDefaultDatum;
 
 /**
  * Helper class to serialize hive writable type to avro record.
@@ -120,10 +121,11 @@ public class HiveAvroSerializer {
   private void setUpRecordFieldFromWritable(TypeInfo typeInfo, Object structFieldData, ObjectInspector fieldOI, GenericData.Record record, Schema.Field field) {
     Object val = serialize(typeInfo, fieldOI, structFieldData, field.schema());
     if (val == null) {
-      if (field.defaultVal() instanceof JsonProperties.Null) {
+      Object defaultValue = readDefaultDatum(field);
+      if (defaultValue instanceof JsonProperties.Null) {
         record.put(field.name(), null);
       } else {
-        record.put(field.name(), field.defaultVal());
+        record.put(field.name(), defaultValue);
       }
     } else {
       record.put(field.name(), val);
@@ -411,10 +413,13 @@ public class HiveAvroSerializer {
         newFieldValue = fieldValue;
       }
       newRecord.put(field.name(), newFieldValue);
-    } else if (field.defaultVal() instanceof JsonProperties.Null) {
+      return;
+    }
+    Object defaultValue = readDefaultDatum(field);
+    if (defaultValue instanceof JsonProperties.Null) {
       newRecord.put(field.name(), null);
     } else {
-      newRecord.put(field.name(), field.defaultVal());
+      newRecord.put(field.name(), defaultValue);
     }
   }
 }

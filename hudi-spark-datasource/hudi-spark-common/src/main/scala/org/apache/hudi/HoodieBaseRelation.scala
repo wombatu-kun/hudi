@@ -733,8 +733,12 @@ object HoodieBaseRelation extends SparkAdapterSupport {
         val requiredFields = requiredColumns.map { col =>
           val f = fieldMap(col)
           // We have to create a new [[Schema.Field]] since Avro schemas can't share field
-          // instances (and will throw "org.apache.avro.AvroRuntimeException: Field already used")
-          new Schema.Field(f.name(), f.schema(), f.doc(), f.defaultVal(), f.order())
+          // instances (and will throw "org.apache.avro.AvroRuntimeException: Field already used").
+          // Going through [[HoodieAvroUtils]] on both ends matters on Avro 1.12+: creating avoids the
+          // AvroTypeException that a raw byte[] default now raises (it reaches validation as a
+          // BinaryNode, and FIXED/BYTES defaults have to be textual), and reading restores a byte
+          // default that was base64-encoded before it got here. See AVRO-3876.
+          HoodieAvroUtils.createNewSchemaField(f.name(), f.schema(), f.doc(), HoodieAvroUtils.readDefaultValue(f), f.order())
         }.toList
         val requiredAvroSchema = Schema.createRecord(avroSchema.getName, avroSchema.getDoc,
           avroSchema.getNamespace, avroSchema.isError, requiredFields.asJava)

@@ -33,6 +33,7 @@ import org.apache.hudi.common.model.HoodieAvroIndexedRecord;
 import org.apache.hudi.common.model.HoodieAvroRecord;
 import org.apache.hudi.common.model.HoodieOperation;
 import org.apache.hudi.common.model.HoodieRecord;
+import org.apache.hudi.common.util.Base64CodecUtil;
 import org.apache.hudi.common.util.Option;
 import org.apache.hudi.common.util.SpillableMapUtils;
 import org.apache.hudi.common.util.StringUtils;
@@ -69,6 +70,8 @@ import org.apache.avro.io.JsonDecoder;
 import org.apache.avro.io.JsonEncoder;
 import org.apache.avro.specific.SpecificRecordBase;
 import org.apache.avro.util.Utf8;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
@@ -97,6 +100,7 @@ import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TimeZone;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
@@ -118,7 +122,24 @@ import static org.apache.hudi.metadata.HoodieTableMetadataUtil.tryUpcastDecimal;
  */
 public class HoodieAvroUtils {
 
+  private static final Logger LOG = LoggerFactory.getLogger(HoodieAvroUtils.class);
+
   public static final String AVRO_VERSION = Schema.class.getPackage().getImplementationVersion();
+
+  /**
+   * Base64 exactly as Jackson's {@code writeBinary} emits it, which is what Avro 1.12.0+ applies to
+   * {@code byte[]} defaults: standard alphabet, '=' padding, no line breaks. Deliberately strict, so
+   * that ISO-8859-1 text of arbitrary bytes (which almost always carries non-ASCII characters) fails
+   * to match. See {@link #restoreBase64EncodedDefault}.
+   */
+  private static final Pattern BASE64_PATTERN =
+      Pattern.compile("(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?");
+  /**
+   * Fields already reported as carrying a base64-encoded default. The restore sits on a per-record
+   * path, so the warning has to be emitted once per field rather than once per record.
+   */
+  private static final Set<String> WARNED_DEFAULT_FIELDS = ConcurrentHashMap.newKeySet();
+
   private static final ThreadLocal<BinaryEncoder> BINARY_ENCODER = ThreadLocal.withInitial(() -> null);
   private static final ThreadLocal<BinaryDecoder> BINARY_DECODER = ThreadLocal.withInitial(() -> null);
 
@@ -627,13 +648,16 @@ public class HoodieAvroUtils {
         newFieldValue = fieldValue;
       }
       newRecord.put(field.pos(), newFieldValue);
-    } else if (field.defaultVal() instanceof JsonProperties.Null) {
+      return;
+    }
+    Object defaultValue = readDefaultDatum(field);
+    if (defaultValue instanceof JsonProperties.Null) {
       newRecord.put(field.pos(), null);
     } else {
-      if (!isNullable(field.schema()) && field.defaultVal() == null) {
+      if (!isNullable(field.schema()) && defaultValue == null) {
         throw new SchemaCompatibilityException("Field " + field.name() + " has no default value and is null in old record");
       }
-      newRecord.put(field.pos(), field.defaultVal());
+      newRecord.put(field.pos(), defaultValue);
     }
   }
 
@@ -1035,10 +1059,11 @@ public class HoodieAvroUtils {
               newRecord.put(i, rewriteRecordWithNewSchema(indexedRecord.get(oldFieldRenamed.pos()), oldFieldRenamed.schema(), fields.get(i).schema(), renameCols, fieldNames, false));
             } else {
               // deal with default value
-              if (fields.get(i).defaultVal() instanceof JsonProperties.Null) {
+              Object defaultValue = readDefaultDatum(fields.get(i));
+              if (defaultValue instanceof JsonProperties.Null) {
                 newRecord.put(i, null);
               } else {
-                newRecord.put(i, fields.get(i).defaultVal());
+                newRecord.put(i, defaultValue);
               }
             }
           }
@@ -1417,6 +1442,120 @@ public class HoodieAvroUtils {
       return new String((byte[]) defaultValue, StandardCharsets.ISO_8859_1);
     }
     return defaultValue;
+  }
+
+  /**
+   * Reads the default value of a field, repairing byte-backed defaults that a schema round-trip
+   * through Avro 1.12.0+ has base64-encoded.
+   *
+   * <p>[AVRO-3876] only changed the write side: a {@code byte[]} default now goes through Jackson's
+   * {@code writeBinary}, which emits base64, while the read side still does
+   * {@code textValue().getBytes(ISO_8859_1)}. Default validation rejects the resulting BinaryNode
+   * for FIXED and BYTES, so the encoding only reaches a stored schema where that validation is
+   * bypassed, but once it is there the damage is a fixed point: the schema hands back the ASCII
+   * bytes of the base64 text instead of the bytes that were written (the five bytes of a
+   * {@code decimal(10,4)} default become the eight bytes of {@code "ADuaygE="}), and copying the
+   * field re-emits exactly those bytes as ISO-8859-1 text.
+   *
+   * @param field the field whose default value is to be read
+   * @return the default value, with a base64-encoded byte default restored where detectable
+   */
+  public static Object readDefaultValue(Schema.Field field) {
+    return restoreBase64EncodedDefault(field, field.defaultVal());
+  }
+
+  /**
+   * Reads the default value of a field as a datum, i.e. typed the way Avro expects it to appear
+   * inside a {@link GenericRecord}.
+   *
+   * <p>{@link #readDefaultValue} hands back the JSON-decoded form, which for a byte-backed field is
+   * a bare {@code byte[]}. No writer accepts that: {@code GenericDatumWriter} casts a FIXED datum to
+   * {@link org.apache.avro.generic.GenericFixed} and a BYTES datum to {@link ByteBuffer}, so putting
+   * the raw array into a record only fails later, with a ClassCastException at write time.
+   *
+   * @param field the field whose default value is to be read
+   * @return the default value, restored where needed and typed for use as a record value
+   */
+  public static Object readDefaultDatum(Schema.Field field) {
+    return toRecordValue(field.schema(), readDefaultValue(field));
+  }
+
+  private static Object toRecordValue(Schema fieldSchema, Object defaultValue) {
+    if (!(defaultValue instanceof byte[])) {
+      return defaultValue;
+    }
+    Schema schema = resolveNullableSchema(fieldSchema);
+    byte[] bytes = (byte[]) defaultValue;
+    if (schema.getType() == Schema.Type.BYTES) {
+      return ByteBuffer.wrap(bytes);
+    }
+    // A length mismatch here means the default is still unusable, i.e. the restore above did not
+    // apply. GenericData.Fixed neither copies nor validates, so wrapping would let the writer
+    // silently truncate to the fixed size; the bare array is left in place to be rejected instead.
+    if (schema.getType() == Schema.Type.FIXED && bytes.length == schema.getFixedSize()) {
+      return new GenericData.Fixed(schema, bytes);
+    }
+    return defaultValue;
+  }
+
+  /**
+   * Restores a byte default that was base64-encoded by Avro 1.12.0+.
+   *
+   * <p>The trigger is deliberately not "the text looks like base64" but "the current bytes cannot
+   * serve as a default for this schema while the decoded ones can", so a legitimate default is
+   * never rewritten. See {@link #isUsableAsDefault} for the per-type criterion.
+   */
+  private static Object restoreBase64EncodedDefault(Schema.Field field, Object defaultValue) {
+    if (!(defaultValue instanceof byte[])) {
+      return defaultValue;
+    }
+    Schema schema = resolveNullableSchema(field.schema());
+    byte[] raw = (byte[]) defaultValue;
+    if (!hasUsabilityCriterion(schema) || isUsableAsDefault(schema, raw)) {
+      return defaultValue;
+    }
+    String text = new String(raw, StandardCharsets.ISO_8859_1);
+    if (text.isEmpty() || !BASE64_PATTERN.matcher(text).matches()) {
+      return defaultValue;
+    }
+    byte[] decoded;
+    try {
+      decoded = Base64CodecUtil.decode(text);
+    } catch (IllegalArgumentException e) {
+      return defaultValue;
+    }
+    if (!isUsableAsDefault(schema, decoded)) {
+      return defaultValue;
+    }
+    if (WARNED_DEFAULT_FIELDS.add(schema.getFullName() + "#" + field.name())) {
+      LOG.warn("Default value of field {} is base64-encoded (AVRO-3876) and was decoded on read. "
+          + "The table schema still holds the encoded form; rewrite it to make the fix permanent.", field.name());
+    }
+    return decoded;
+  }
+
+  /**
+   * Whether a byte default of this schema can be told apart from a base64-encoded one at all.
+   * A plain BINARY column admits any byte sequence, so no such criterion exists for it and its
+   * defaults are left untouched.
+   */
+  private static boolean hasUsabilityCriterion(Schema schema) {
+    return schema.getType() == Schema.Type.FIXED
+        || (schema.getType() == Schema.Type.BYTES && schema.getLogicalType() instanceof Decimal);
+  }
+
+  /**
+   * Whether the given bytes can serve as a default for the schema. For FIXED the length is decisive:
+   * a legitimate default is exactly {@code getFixedSize()} bytes, a base64-encoded one is
+   * {@code 4*ceil(size/3)} bytes, which is strictly larger for every size. For a decimal the
+   * unscaled value has to fit the declared precision, which base64 inflation always overflows.
+   */
+  private static boolean isUsableAsDefault(Schema schema, byte[] value) {
+    if (schema.getType() == Schema.Type.FIXED) {
+      return value.length == schema.getFixedSize();
+    }
+    return value.length > 0
+        && new BigInteger(value).abs().toString().length() <= ((Decimal) schema.getLogicalType()).getPrecision();
   }
 
   /**

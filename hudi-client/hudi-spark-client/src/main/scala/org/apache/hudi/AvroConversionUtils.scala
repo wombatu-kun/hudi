@@ -19,7 +19,7 @@
 package org.apache.hudi
 
 import org.apache.hudi.HoodieSparkUtils.sparkAdapter
-import org.apache.hudi.avro.AvroSchemaUtils
+import org.apache.hudi.avro.{AvroSchemaUtils, HoodieAvroUtils}
 import org.apache.hudi.exception.SchemaCompatibilityException
 import org.apache.hudi.internal.schema.HoodieSchemaException
 
@@ -192,11 +192,14 @@ object AvroConversionUtils {
             case Schema.Type.UNION => resolveUnion(field.schema(), structFields(i).dataType)
             case _ => (getAvroSchemaWithDefaults(field.schema(), structFields(i).dataType), false)
           }
-          new Schema.Field(field.name(), newSchema, comment,
+          // Constructed through [[HoodieAvroUtils]] on both ends so that, on Avro 1.12+, a raw byte[]
+          // default does not raise AvroTypeException on the way out (it would reach validation as a
+          // BinaryNode) and a base64-encoded one is restored on the way in. See AVRO-3876.
+          HoodieAvroUtils.createNewSchemaField(field.name(), newSchema, comment,
             if (containsNullSchema) {
               JsonProperties.NULL_VALUE
             } else {
-              field.defaultVal()
+              HoodieAvroUtils.readDefaultValue(field)
             })
         }).asJava
         Schema.createRecord(schema.getName, schema.getDoc, schema.getNamespace, schema.isError, modifiedFields)

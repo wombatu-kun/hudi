@@ -18,6 +18,7 @@
 
 package org.apache.hudi.common.model;
 
+import org.apache.hudi.avro.HoodieAvroUtils;
 import org.apache.hudi.common.util.Option;
 
 import org.apache.avro.Schema;
@@ -90,7 +91,7 @@ public class OverwriteNonDefaultsWithLatestAvroPayload extends OverwriteWithLate
       Schema.Field field) {
     Object value = baseRecord.get(field.name());
     value = field.schema().getType().equals(Schema.Type.STRING) && value != null ? value.toString() : value;
-    Object defaultValue = field.defaultVal();
+    Object defaultValue = HoodieAvroUtils.readDefaultValue(field);
     if (!overwriteField(value, defaultValue)) {
       builder.set(field, value);
     } else {

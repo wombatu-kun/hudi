@@ -30,15 +30,18 @@ import org.apache.hudi.avro.model.StringWrapper;
 import org.apache.hudi.avro.model.TimestampMicrosWrapper;
 import org.apache.hudi.common.model.HoodieRecord;
 import org.apache.hudi.common.testutils.SchemaTestUtil;
+import org.apache.hudi.common.util.Base64CodecUtil;
 import org.apache.hudi.exception.HoodieException;
 import org.apache.hudi.exception.SchemaCompatibilityException;
 
 import org.apache.avro.AvroRuntimeException;
 import org.apache.avro.JsonProperties;
+import org.apache.avro.LogicalTypes;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericDatumReader;
 import org.apache.avro.generic.GenericDatumWriter;
+import org.apache.avro.generic.GenericFixed;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.io.BinaryDecoder;
 import org.apache.avro.io.BinaryEncoder;
@@ -54,7 +57,9 @@ import org.junit.jupiter.params.provider.MethodSource;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.sql.Date;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -74,6 +79,7 @@ import static org.apache.hudi.avro.HoodieAvroUtils.sanitizeName;
 import static org.apache.hudi.avro.HoodieAvroUtils.unwrapAvroValueWrapper;
 import static org.apache.hudi.avro.HoodieAvroUtils.wrapValueIntoAvro;
 import static org.apache.hudi.common.util.StringUtils.getUTF8Bytes;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -651,5 +657,119 @@ public class TestHoodieAvroUtils {
     record.put("timestamp", "foo");
     String jsonString = HoodieAvroUtils.safeAvroToJsonString(record);
     assertEquals("{\"timestamp\": \"foo\", \"_row_key\": \"key\", \"non_pii_col\": \"val1\", \"pii_col\": \"val2\"}", jsonString);
+  }
+
+  /**
+   * Unscaled bytes of {@code decimal(10,4) DEFAULT 100000.0001}, i.e. 1000000001 padded to the
+   * {@code fixed(5)} that Spark's decimal-to-Avro conversion produces for precision 10.
+   */
+  private static final byte[] DECIMAL_DEFAULT_BYTES = new byte[] {0x00, 0x3B, (byte) 0x9A, (byte) 0xCA, 0x01};
+
+  private static String decimalFixedSchema(String defaultValue) {
+    return "{\"type\":\"record\",\"name\":\"TestDecimalDefault\",\"fields\":[{\"name\":\"amount\",\"type\":"
+        + "{\"type\":\"fixed\",\"name\":\"amount_fixed\",\"size\":5,\"logicalType\":\"decimal\",\"precision\":10,\"scale\":4},"
+        + "\"default\":\"" + defaultValue + "\"}]}";
+  }
+
+  @Test
+  void testByteDefaultSurvivesSchemaRoundTrip() {
+    // The write side must not emit base64: on Avro 1.12+ a raw `new Schema.Field` would, since
+    // [AVRO-3876] routes byte[] defaults through Jackson's writeBinary (AVRO-3876). Reading is
+    // deliberately done with the plain Avro accessor, so that a regression cannot be masked by the
+    // repair in readDefaultValue.
+    Schema fixedType = LogicalTypes.decimal(10, 4).addToSchema(Schema.createFixed("amount_fixed", null, null, 5));
+    Schema.Field field = HoodieAvroUtils.createNewSchemaField("amount", fixedType, null, DECIMAL_DEFAULT_BYTES);
+    Schema schema = Schema.createRecord("TestDecimalDefault", null, null, false, Collections.singletonList(field));
+
+    Schema reparsed = new Schema.Parser().parse(schema.toString());
+    assertArrayEquals(DECIMAL_DEFAULT_BYTES, (byte[]) reparsed.getField("amount").defaultVal());
+  }
+
+  @Test
+  void testReadDefaultValueRestoresBase64EncodedFixedDefault() {
+    assertEquals("ADuaygE=", Base64CodecUtil.encode(DECIMAL_DEFAULT_BYTES));
+
+    Schema corrupted = new Schema.Parser().parse(decimalFixedSchema("ADuaygE="));
+    Schema.Field field = corrupted.getField("amount");
+    // Avro reads the base64 text back as its eight ASCII bytes, i.e. unscaled 4703012972390729021,
+    // which at scale 4 renders as 470301297239072.9021 and overflows decimal(10,4)
+    assertEquals(8, ((byte[]) field.defaultVal()).length);
+
+    assertArrayEquals(DECIMAL_DEFAULT_BYTES, (byte[]) HoodieAvroUtils.readDefaultValue(field));
+  }
+
+  @Test
+  void testReadDefaultValueRestoresBase64EncodedBytesDecimalDefault() {
+    byte[] unscaled = new BigInteger("1000000001").toByteArray();
+    Schema bytesType = LogicalTypes.decimal(10, 4).addToSchema(Schema.create(Schema.Type.BYTES));
+    Schema.Field field = new Schema.Field("amount", bytesType, null, Base64CodecUtil.encode(unscaled));
+
+    assertArrayEquals(unscaled, (byte[]) HoodieAvroUtils.readDefaultValue(field));
+  }
+
+  @Test
+  void testReadDefaultValueKeepsLegitimateByteDefault() {
+    // 0x41414141 spells "AAAA", which is valid base64, yet it is a legitimate default in both cases:
+    // its length matches the FIXED size, and as an unscaled decimal it fits the declared precision.
+    // Only a default that is already unusable for its schema is a repair candidate.
+    byte[] legitimate = new byte[] {0x41, 0x41, 0x41, 0x41};
+    String asText = new String(legitimate, StandardCharsets.ISO_8859_1);
+
+    Schema.Field fixedField =
+        new Schema.Field("amount", Schema.createFixed("amount_fixed", null, null, 4), null, asText);
+    assertArrayEquals(legitimate, (byte[]) HoodieAvroUtils.readDefaultValue(fixedField));
+
+    Schema bytesType = LogicalTypes.decimal(10, 2).addToSchema(Schema.create(Schema.Type.BYTES));
+    assertArrayEquals(legitimate,
+        (byte[]) HoodieAvroUtils.readDefaultValue(new Schema.Field("amount", bytesType, null, asText)));
+
+    // A plain BINARY default admits any byte sequence, so it has no usability criterion at all
+    Schema.Field binaryField = new Schema.Field("bin", Schema.create(Schema.Type.BYTES), null, "ADuaygE=");
+    assertArrayEquals("ADuaygE=".getBytes(StandardCharsets.ISO_8859_1),
+        (byte[]) HoodieAvroUtils.readDefaultValue(binaryField));
+  }
+
+  @Test
+  void testReadDefaultDatumTypesByteDefaultsForRecordUse() throws IOException {
+    // The JSON-decoded form of a byte-backed default is a bare byte[], which no writer accepts:
+    // GenericDatumWriter casts a FIXED datum to GenericFixed and a BYTES datum to ByteBuffer
+    Schema fixedType = LogicalTypes.decimal(10, 4).addToSchema(Schema.createFixed("amount_fixed", null, null, 5));
+    Schema.Field fixedField = HoodieAvroUtils.createNewSchemaField("amount", fixedType, null, DECIMAL_DEFAULT_BYTES);
+    assertTrue(HoodieAvroUtils.readDefaultValue(fixedField) instanceof byte[]);
+
+    Object fixedDatum = HoodieAvroUtils.readDefaultDatum(fixedField);
+    assertTrue(fixedDatum instanceof GenericFixed, "FIXED default should be typed as GenericFixed");
+    assertArrayEquals(DECIMAL_DEFAULT_BYTES, ((GenericFixed) fixedDatum).bytes());
+    assertEquals(5, writeSingleField(fixedField, fixedDatum));
+
+    byte[] unscaled = new BigInteger("1000000001").toByteArray();
+    Schema bytesType = LogicalTypes.decimal(10, 4).addToSchema(Schema.create(Schema.Type.BYTES));
+    Schema.Field bytesField = HoodieAvroUtils.createNewSchemaField("amount", bytesType, null, unscaled);
+
+    Object bytesDatum = HoodieAvroUtils.readDefaultDatum(bytesField);
+    assertTrue(bytesDatum instanceof ByteBuffer, "BYTES default should be typed as ByteBuffer");
+    assertEquals(ByteBuffer.wrap(unscaled), bytesDatum);
+    // one length byte plus the four unscaled bytes
+    assertEquals(5, writeSingleField(bytesField, bytesDatum));
+  }
+
+  @Test
+  void testReadDefaultDatumLeavesUnusableFixedDefaultBare() {
+    // GenericData.Fixed neither copies nor validates, so wrapping a wrong-sized array would make the
+    // writer silently truncate it. Such a default stays bare and is rejected at write time instead.
+    Schema.Field field = new Schema.Parser().parse(decimalFixedSchema("QUFBQUFB")).getField("amount");
+    assertTrue(HoodieAvroUtils.readDefaultDatum(field) instanceof byte[]);
+  }
+
+  private static int writeSingleField(Schema.Field field, Object datum) throws IOException {
+    Schema schema = Schema.createRecord("TestDecimalDefault", null, null, false,
+        Collections.singletonList(HoodieAvroUtils.createNewSchemaField(field)));
+    GenericRecord record = new GenericData.Record(schema);
+    record.put(field.name(), datum);
+    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    BinaryEncoder encoder = EncoderFactory.get().binaryEncoder(out, null);
+    new GenericDatumWriter<GenericRecord>(schema).write(record, encoder);
+    encoder.flush();
+    return out.size();
   }
 }
