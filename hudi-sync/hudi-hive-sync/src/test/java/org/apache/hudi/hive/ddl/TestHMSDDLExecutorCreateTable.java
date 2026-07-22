@@ -63,8 +63,7 @@ class TestHMSDDLExecutorCreateTable {
     verify(client).createTable(captor.capture());
     int createTime = captor.getValue().getCreateTime();
 
-    // createTime must be epoch seconds within the call window. Passing raw milliseconds instead
-    // would overflow the int cast into a garbage/negative value far outside this range.
+    // createTime must be epoch seconds within the call window.
     assertTrue(createTime >= beforeSec && createTime <= afterSec,
         "createTime should be epoch seconds within [" + beforeSec + ", " + afterSec + "] but was " + createTime);
   }
