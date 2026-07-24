@@ -127,10 +127,12 @@ class TestHiveMetastoreBasedLockProviderLockLoss extends HiveMetastoreBasedLockP
         .when(client).heartbeat(anyLong(), anyLong());
 
     HiveMetastoreBasedLockProvider provider = new HiveMetastoreBasedLockProvider(lockConfiguration, client);
-    assertTrue(provider.acquireLock(1000L, TimeUnit.MILLISECONDS, lockComponent));
-    awaitUntil(() -> provider.getLock() == null, "the lost lock must be dropped by the heartbeat");
-
-    provider.close();
+    try {
+      assertTrue(provider.acquireLock(1000L, TimeUnit.MILLISECONDS, lockComponent));
+      awaitUntil(() -> provider.getLock() == null, "the lost lock must be dropped by the heartbeat");
+    } finally {
+      provider.close();
+    }
 
     // There is nothing left to release at the metastore, but the heartbeat pool must still go away.
     verify(client, never()).unlock(anyLong());
@@ -209,6 +211,33 @@ class TestHiveMetastoreBasedLockProviderLockLoss extends HiveMetastoreBasedLockP
       verify(client).unlock(OTHER_LOCK_ID);
 
       // Releasing must not report the loss that belonged to the previous lock.
+      assertDoesNotThrow(provider::unlock);
+    } finally {
+      provider.close();
+    }
+  }
+
+  @Test
+  void lockThatWasOnlyQueuedIsNeverHeartbeated() throws Exception {
+    IMetaStoreClient client = mock(IMetaStoreClient.class);
+    when(client.lock(any())).thenReturn(waitingLock(LOCK_ID));
+    doThrow(new NoSuchLockException("lock " + LOCK_ID + " was never granted"))
+        .when(client).heartbeat(anyLong(), anyLong());
+    // Releasing the queued lock is the provider's very next step, and it is an RPC: parking inside
+    // it holds open exactly the window in which a heartbeat scheduled for that lock would tick.
+    doAnswer(invocation -> {
+      Thread.sleep(HEARTBEAT_INTERVAL_MS * 5);
+      return null;
+    }).when(client).unlock(anyLong());
+
+    HiveMetastoreBasedLockProvider provider = new HiveMetastoreBasedLockProvider(lockConfiguration, client);
+    try {
+      assertFalse(provider.acquireLock(1000L, TimeUnit.MILLISECONDS, lockComponent));
+
+      // A lock that was never granted must never be renewed: a tick failing for it would be read
+      // as the metastore taking away exclusivity that the writer never had in the first place.
+      verify(client, never()).heartbeat(anyLong(), anyLong());
+      assertNull(heartbeatFutureOf(provider), "a queued lock must not be given a heartbeat schedule");
       assertDoesNotThrow(provider::unlock);
     } finally {
       provider.close();

@@ -252,12 +252,18 @@ public class HiveMetastoreBasedLockProvider implements LockProvider<LockResponse
 
   /**
    * Schedules a periodic {@link Heartbeat} to refresh the currently held lock in case a commit
-   * takes a long time. Must be called only after {@link #lock} has been set.
+   * takes a long time. Does nothing unless {@link #lock} is held right now, so that callers may
+   * invoke it without checking the state of the response they just got.
    */
   private void scheduleHeartbeat() {
     LockResponse lockResponseLocal = lock;
     if (lockResponseLocal == null) {
       // Released while the acquisition was still completing, so there is nothing left to renew.
+      return;
+    }
+    if (lockResponseLocal.getState() != LockState.ACQUIRED) {
+      // The metastore only queued the request. The caller releases such a lock right away, and
+      // renewing one that was never granted can only latch a loss that never happened.
       return;
     }
     // Bind the id into the task and its callback: cancelling a schedule does not stop a tick that
