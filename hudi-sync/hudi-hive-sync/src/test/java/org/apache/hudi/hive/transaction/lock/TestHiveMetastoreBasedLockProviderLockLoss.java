@@ -19,30 +19,19 @@
 
 package org.apache.hudi.hive.transaction.lock;
 
-import org.apache.hudi.common.config.LockConfiguration;
-import org.apache.hudi.common.config.TypedProperties;
 import org.apache.hudi.exception.HoodieLockException;
 
 import org.apache.hadoop.hive.metastore.IMetaStoreClient;
-import org.apache.hadoop.hive.metastore.api.LockComponent;
-import org.apache.hadoop.hive.metastore.api.LockLevel;
-import org.apache.hadoop.hive.metastore.api.LockResponse;
-import org.apache.hadoop.hive.metastore.api.LockState;
-import org.apache.hadoop.hive.metastore.api.LockType;
 import org.apache.hadoop.hive.metastore.api.NoSuchLockException;
 import org.apache.thrift.TException;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.lang.reflect.Field;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
-import static org.apache.hudi.common.config.LockConfiguration.HIVE_DATABASE_NAME_PROP_KEY;
-import static org.apache.hudi.common.config.LockConfiguration.HIVE_TABLE_NAME_PROP_KEY;
-import static org.apache.hudi.common.config.LockConfiguration.LOCK_HEARTBEAT_INTERVAL_MS_KEY;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -64,28 +53,17 @@ import static org.mockito.Mockito.when;
  * Unit tests for how {@link HiveMetastoreBasedLockProvider} reacts to the metastore reporting its
  * lock as gone, with a mocked {@link IMetaStoreClient} and no live metastore or ZooKeeper.
  */
-class TestHiveMetastoreBasedLockProviderLockLoss {
+class TestHiveMetastoreBasedLockProviderLockLoss extends HiveMetastoreBasedLockProviderTestBase {
 
-  private static final String DB = "testdb";
-  private static final String TABLE = "testtable";
   private static final long LOCK_ID = 42L;
   private static final long OTHER_LOCK_ID = 43L;
   private static final long HEARTBEAT_INTERVAL_MS = 100L;
   private static final long AWAIT_TIMEOUT_MS = 30_000L;
 
-  private LockConfiguration lockConfiguration;
-  private LockComponent lockComponent;
-
-  @BeforeEach
-  void setUp() {
-    TypedProperties props = new TypedProperties();
-    props.setProperty(HIVE_DATABASE_NAME_PROP_KEY, DB);
-    props.setProperty(HIVE_TABLE_NAME_PROP_KEY, TABLE);
+  @Override
+  protected long heartbeatIntervalMs() {
     // Keep the ticks short so the scheduled heartbeat fires within the test.
-    props.setProperty(LOCK_HEARTBEAT_INTERVAL_MS_KEY, String.valueOf(HEARTBEAT_INTERVAL_MS));
-    lockConfiguration = new LockConfiguration(props);
-    lockComponent = new LockComponent(LockType.EXCLUSIVE, LockLevel.TABLE, DB);
-    lockComponent.setTablename(TABLE);
+    return HEARTBEAT_INTERVAL_MS;
   }
 
   @Test
@@ -118,6 +96,46 @@ class TestHiveMetastoreBasedLockProviderLockLoss {
     } finally {
       provider.close();
     }
+  }
+
+  @Test
+  void lockLostAfterTryLockIsReportedOnUnlock() throws Exception {
+    IMetaStoreClient client = mock(IMetaStoreClient.class);
+    when(client.lock(any())).thenReturn(acquiredLock(LOCK_ID));
+    doThrow(new NoSuchLockException("lock " + LOCK_ID + " does not exist"))
+        .when(client).heartbeat(anyLong(), anyLong());
+
+    HiveMetastoreBasedLockProvider provider = new HiveMetastoreBasedLockProvider(lockConfiguration, client);
+    try {
+      // Same loss, but driven through the entry point the LockManager actually calls rather than
+      // the test-only acquireLock overload.
+      assertTrue(provider.tryLock(1000L, TimeUnit.MILLISECONDS));
+      awaitUntil(() -> provider.getLock() == null, "the lost lock must be dropped by the heartbeat");
+
+      assertThrows(HoodieLockException.class, provider::unlock);
+      verify(client, never()).unlock(anyLong());
+    } finally {
+      provider.close();
+    }
+  }
+
+  @Test
+  void closeAfterALostLockSendsNoUnlockAndShutsDownTheExecutor() throws Exception {
+    IMetaStoreClient client = mock(IMetaStoreClient.class);
+    when(client.lock(any())).thenReturn(acquiredLock(LOCK_ID));
+    doThrow(new NoSuchLockException("lock " + LOCK_ID + " does not exist"))
+        .when(client).heartbeat(anyLong(), anyLong());
+
+    HiveMetastoreBasedLockProvider provider = new HiveMetastoreBasedLockProvider(lockConfiguration, client);
+    assertTrue(provider.acquireLock(1000L, TimeUnit.MILLISECONDS, lockComponent));
+    awaitUntil(() -> provider.getLock() == null, "the lost lock must be dropped by the heartbeat");
+
+    provider.close();
+
+    // There is nothing left to release at the metastore, but the heartbeat pool must still go away.
+    verify(client, never()).unlock(anyLong());
+    ScheduledExecutorService executor = readField(provider, "executor");
+    assertTrue(executor.isShutdown(), "the heartbeat pool must be shut down after a lost lock");
   }
 
   @Test
@@ -188,6 +206,7 @@ class TestHiveMetastoreBasedLockProviderLockLoss {
       // The second attempt only got queued, so it leaves no lock behind and nothing was expired
       // by the metastore this time round.
       assertFalse(provider.acquireLock(1000L, TimeUnit.MILLISECONDS, lockComponent));
+      verify(client).unlock(OTHER_LOCK_ID);
 
       // Releasing must not report the loss that belonged to the previous lock.
       assertDoesNotThrow(provider::unlock);
@@ -253,6 +272,10 @@ class TestHiveMetastoreBasedLockProviderLockLoss {
       assertDoesNotThrow(provider::unlock);
       verify(client).unlock(OTHER_LOCK_ID);
     } finally {
+      // Free the parked tick even when an assertion above failed: close() only shuts the executor
+      // down, which neither interrupts the await nor lets the non-daemon thread exit, so leaving
+      // it parked would turn a failing test into a hanging JVM.
+      releaseStaleTick.countDown();
       provider.close();
     }
   }
@@ -286,14 +309,15 @@ class TestHiveMetastoreBasedLockProviderLockLoss {
       // no-op it has always been instead of reporting a loss that never happened.
       assertDoesNotThrow(provider::unlock);
     } finally {
+      // See the note in staleHeartbeatFromAReleasedLockDoesNotDropTheNextLock: a parked tick must
+      // never outlive a failed assertion.
+      releaseTick.countDown();
       provider.close();
     }
   }
 
   private static ScheduledFuture<?> heartbeatFutureOf(HiveMetastoreBasedLockProvider provider) throws Exception {
-    Field field = HiveMetastoreBasedLockProvider.class.getDeclaredField("future");
-    field.setAccessible(true);
-    return (ScheduledFuture<?>) field.get(provider);
+    return readField(provider, "future");
   }
 
   private static void awaitUntil(BooleanSupplier condition, String message) throws InterruptedException {
@@ -305,20 +329,5 @@ class TestHiveMetastoreBasedLockProviderLockLoss {
       Thread.sleep(20L);
     }
     fail(message);
-  }
-
-  private static LockResponse acquiredLock(long lockId) {
-    return lockResponse(lockId, LockState.ACQUIRED);
-  }
-
-  private static LockResponse waitingLock(long lockId) {
-    return lockResponse(lockId, LockState.WAITING);
-  }
-
-  private static LockResponse lockResponse(long lockId, LockState state) {
-    LockResponse response = new LockResponse();
-    response.setLockid(lockId);
-    response.setState(state);
-    return response;
   }
 }

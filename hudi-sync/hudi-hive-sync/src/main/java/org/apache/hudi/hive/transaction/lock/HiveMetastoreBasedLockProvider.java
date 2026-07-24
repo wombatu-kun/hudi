@@ -127,9 +127,19 @@ public class HiveMetastoreBasedLockProvider implements LockProvider<LockResponse
     } catch (ExecutionException | InterruptedException | TimeoutException | TException e) {
       throw new HoodieLockException(generateLogStatement(FAILED_TO_ACQUIRE, generateLogSuffixString()), e);
     }
-    return this.lock != null && this.lock.getState() == LockState.ACQUIRED;
+    return isLockAcquired();
   }
 
+  /**
+   * Releases the lock held at the metastore, if any.
+   *
+   * <p>Unlike most providers, which stay silent when they do not believe they hold a lock, this one
+   * deliberately fails when the metastore had already expired or aborted the lock: the writer went
+   * on committing without exclusivity and has to hear about it. Note that {@code LockManager.unlock()}
+   * skips its metrics and its {@code close()} when the provider throws.
+   *
+   * @throws HoodieLockException if the metastore took the lock away, or if releasing it fails.
+   */
   @Override
   public void unlock() {
     try {
@@ -191,7 +201,16 @@ public class HiveMetastoreBasedLockProvider implements LockProvider<LockResponse
       throws InterruptedException, ExecutionException, TimeoutException, TException {
     ValidationUtils.checkArgument(this.lock == null, ALREADY_ACQUIRED.name());
     acquireLockInternal(time, unit, component);
-    return this.lock != null && this.lock.getState() == LockState.ACQUIRED;
+    return isLockAcquired();
+  }
+
+  /**
+   * Whether the lock is held right now. Reads {@link #lock} once: the heartbeat thread clears it
+   * as soon as the metastore reports the lock as gone, so re-reading the field can mix two states.
+   */
+  private boolean isLockAcquired() {
+    LockResponse lockResponseLocal = this.lock;
+    return lockResponseLocal != null && lockResponseLocal.getState() == LockState.ACQUIRED;
   }
 
   private void acquireLockInternal(long time, TimeUnit unit, LockComponent lockComponent)
@@ -266,9 +285,12 @@ public class HiveMetastoreBasedLockProvider implements LockProvider<LockResponse
       log.debug("Ignoring a heartbeat failure for the already released lock {}", lockId, cause);
       return;
     }
+    // Order matters: the flag is set first, so an unlock() racing with this can never find the
+    // lock gone without a reason for it; and the schedule is cancelled before the lock is dropped,
+    // so whoever observes the drop is guaranteed to see the renewal already stopped.
     lockLostRemotely = true;
-    lock = null;
     cancelHeartbeat();
+    lock = null;
     log.error("The metastore expired or aborted the lock at{}, heartbeat stopped and exclusivity is lost",
         generateLogSuffixString(), cause);
   }
