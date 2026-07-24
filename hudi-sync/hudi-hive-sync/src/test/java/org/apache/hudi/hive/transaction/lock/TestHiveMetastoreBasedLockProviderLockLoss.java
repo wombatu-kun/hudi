@@ -210,6 +210,86 @@ class TestHiveMetastoreBasedLockProviderLockLoss {
     }
   }
 
+  @Test
+  void staleHeartbeatFromAReleasedLockDoesNotDropTheNextLock() throws Exception {
+    IMetaStoreClient client = mock(IMetaStoreClient.class);
+    when(client.lock(any())).thenReturn(acquiredLock(LOCK_ID), acquiredLock(OTHER_LOCK_ID));
+    CountDownLatch staleTickStarted = new CountDownLatch(1);
+    CountDownLatch releaseStaleTick = new CountDownLatch(1);
+    CountDownLatch newLockHeartbeats = new CountDownLatch(3);
+    doAnswer(invocation -> {
+      long heartbeatedLockId = invocation.getArgument(1);
+      if (heartbeatedLockId == LOCK_ID) {
+        // Park this tick inside the RPC until the lock it renews has been released and another one
+        // taken, then fail it the way the metastore fails a heartbeat for a lock it no longer has.
+        staleTickStarted.countDown();
+        releaseStaleTick.await();
+        throw new NoSuchLockException("lock " + LOCK_ID + " does not exist");
+      }
+      newLockHeartbeats.countDown();
+      return null;
+    }).when(client).heartbeat(anyLong(), anyLong());
+
+    HiveMetastoreBasedLockProvider provider = new HiveMetastoreBasedLockProvider(lockConfiguration, client);
+    try {
+      assertTrue(provider.acquireLock(1000L, TimeUnit.MILLISECONDS, lockComponent));
+      assertTrue(staleTickStarted.await(AWAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS),
+          "the heartbeat for the first lock must be in flight before it is released");
+
+      provider.unlock();
+      assertTrue(provider.acquireLock(1000L, TimeUnit.MILLISECONDS, lockComponent));
+
+      // Only now does the tick scheduled for the first lock come back, failing because that lock
+      // was released here. Cancelling its schedule could never have stopped it.
+      releaseStaleTick.countDown();
+
+      assertTrue(newLockHeartbeats.await(AWAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS),
+          "the stale tick must not stop the renewal of the lock held now, which would let the "
+              + "metastore expire a perfectly healthy lock mid-commit");
+      assertNotNull(provider.getLock(), "the stale tick must not drop the lock held now");
+      assertFalse(heartbeatFutureOf(provider).isCancelled(),
+          "the stale tick must not cancel the schedule of the lock held now");
+
+      assertDoesNotThrow(provider::unlock);
+      verify(client).unlock(OTHER_LOCK_ID);
+    } finally {
+      provider.close();
+    }
+  }
+
+  @Test
+  void releasingALockNormallyIsNotReportedAsLost() throws Exception {
+    IMetaStoreClient client = mock(IMetaStoreClient.class);
+    when(client.lock(any())).thenReturn(acquiredLock(LOCK_ID));
+    CountDownLatch tickStarted = new CountDownLatch(1);
+    CountDownLatch releaseTick = new CountDownLatch(1);
+    doAnswer(invocation -> {
+      tickStarted.countDown();
+      releaseTick.await();
+      throw new NoSuchLockException("lock " + LOCK_ID + " does not exist");
+    }).when(client).heartbeat(anyLong(), anyLong());
+
+    HiveMetastoreBasedLockProvider provider = new HiveMetastoreBasedLockProvider(lockConfiguration, client);
+    try {
+      assertTrue(provider.acquireLock(1000L, TimeUnit.MILLISECONDS, lockComponent));
+      assertTrue(tickStarted.await(AWAIT_TIMEOUT_MS, TimeUnit.MILLISECONDS),
+          "the heartbeat must be in flight before the lock is released");
+
+      provider.unlock();
+      verify(client).unlock(LOCK_ID);
+      releaseTick.countDown();
+
+      // Let the released tick finish and run whatever it makes of the failure.
+      Thread.sleep(HEARTBEAT_INTERVAL_MS * 5);
+
+      // The heartbeat failed only because the lock was released here, so releasing again stays the
+      // no-op it has always been instead of reporting a loss that never happened.
+      assertDoesNotThrow(provider::unlock);
+    } finally {
+      provider.close();
+    }
+  }
+
   private static ScheduledFuture<?> heartbeatFutureOf(HiveMetastoreBasedLockProvider provider) throws Exception {
     Field field = HiveMetastoreBasedLockProvider.class.getDeclaredField("future");
     field.setAccessible(true);

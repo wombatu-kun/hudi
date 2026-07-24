@@ -167,13 +167,15 @@ public class HiveMetastoreBasedLockProvider implements LockProvider<LockResponse
   @Override
   public void close() {
     try {
-      // Snapshot the lock: the heartbeat thread clears it as soon as the metastore reports it gone.
+      // Snapshot the lock, then stop claiming it before releasing it, exactly as unlock() does:
+      // the release itself makes an in-flight heartbeat fail, and that must not be mistaken for
+      // the metastore taking the lock away.
       LockResponse lockResponseLocal = lock;
+      lock = null;
+      cancelHeartbeat();
       if (lockResponseLocal != null) {
         hiveClient.unlock(lockResponseLocal.getLockid());
-        lock = null;
       }
-      cancelHeartbeat();
       Hive.closeCurrent();
     } catch (Exception e) {
       log.error(generateLogStatement(org.apache.hudi.common.lock.LockState.FAILED_TO_RELEASE, generateLogSuffixString()), e);
@@ -234,7 +236,15 @@ public class HiveMetastoreBasedLockProvider implements LockProvider<LockResponse
    * takes a long time. Must be called only after {@link #lock} has been set.
    */
   private void scheduleHeartbeat() {
-    Heartbeat heartbeat = new Heartbeat(hiveClient, lock.getLockid(), this::onLockLost);
+    LockResponse lockResponseLocal = lock;
+    if (lockResponseLocal == null) {
+      // Released while the acquisition was still completing, so there is nothing left to renew.
+      return;
+    }
+    // Bind the id into the task and its callback: cancelling a schedule does not stop a tick that
+    // is already inside the heartbeat RPC, so a tick can outlive the lock it was scheduled for.
+    long lockId = lockResponseLocal.getLockid();
+    Heartbeat heartbeat = new Heartbeat(hiveClient, lockId, cause -> onLockLost(lockId, cause));
     long heartbeatIntervalMs = lockConfiguration.getConfig()
         .getLong(LOCK_HEARTBEAT_INTERVAL_MS_KEY, DEFAULT_LOCK_HEARTBEAT_INTERVAL_MS);
     future = executor.scheduleAtFixedRate(heartbeat, heartbeatIntervalMs / 2, heartbeatIntervalMs, TimeUnit.MILLISECONDS);
@@ -243,8 +253,19 @@ public class HiveMetastoreBasedLockProvider implements LockProvider<LockResponse
   /**
    * Invoked from the heartbeat thread once the metastore reports the lock as expired or aborted.
    * The lock cannot be renewed anymore, so stop heartbeating it and stop claiming it is held.
+   *
+   * @param lockId the lock this heartbeat was scheduled for, which is not necessarily the one held
+   *               now: releasing a lock is itself a reason for an in-flight heartbeat to fail.
    */
-  private void onLockLost(Exception cause) {
+  private void onLockLost(long lockId, Exception cause) {
+    LockResponse lockResponseLocal = lock;
+    if (lockResponseLocal == null || lockResponseLocal.getLockid() != lockId) {
+      // We released this lock ourselves while the tick was in flight, which is why the metastore
+      // no longer knows about it. Nothing was lost, and any lock held now is a different one that
+      // keeps its own heartbeat.
+      log.debug("Ignoring a heartbeat failure for the already released lock {}", lockId, cause);
+      return;
+    }
     lockLostRemotely = true;
     lock = null;
     cancelHeartbeat();
